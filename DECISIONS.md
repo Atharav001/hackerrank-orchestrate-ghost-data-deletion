@@ -29,6 +29,124 @@ This file is append-only in spirit: never delete or rewrite a past entry, even i
 
 ---
 
+## Current Project Guide — read this before evaluating the decision history
+
+This section describes what the repository currently does, from input files through the final CSV, and the limitations observed in the implementation and latest measured run. It is a guide to the code as it exists, not a claim that every semantic decision is correct.
+
+### 1. Purpose and submission contract
+
+The project is a deterministic deletion-audit pipeline for the HackerRank Orchestrate “Ghost Data Still Exists” challenge. It reads participant-facing files under `dataset/`, determines whether each request authorizes deletion, searches available evidence for the subject's data and recreation risks, applies `deletion_rules.csv`, then writes root `output.csv` with exactly `case_id,deletion_status,steps_json`.
+
+The full evaluation file has 518 requests. A valid prediction uses `NOT_APPLICABLE`, `COMPLETE`, or `INCOMPLETE`; step arrays contain only the contract's allowed operations, phases, and states. Predictions must be based on evidence available at or before each case's `audit_at`. Workflow claims such as `reported_status` and a successful activity result do not by themselves establish that a record was removed.
+
+### 2. Inputs and their roles
+
+| Input | How this project uses it |
+|---|---|
+| `dataset/deletion_requests.csv` | One case per row: request email/text, request and report timestamps, claimed workflow status, and audit cutoff. This is the only full-set prediction input. |
+| `dataset/user_identities.csv` | Current user ID, name, email, phone, email hash, and identity snapshot time. |
+| `dataset/user_audit_log.csv` | Historical email, phone, and hash changes, linked by stable user ID and filtered for the case cutoff. |
+| `dataset/evidence_files.csv` | Evidence ID, path, origin, and capture time. The manifest alone does not establish the affected subject. |
+| `dataset/evidence/` | Evidence artifacts: JSON, SQLite-compatible SQL snapshots, logs, handover text, PDFs, and screenshots. The parser connects them using recognized identifiers, resource IDs, timestamps, and activity links. |
+| `dataset/system_activity.csv` | Global operational event stream. It can link a subject to resources or support active-flow and restore-risk findings. Its result fields are not accepted as proof of final resource state. |
+| `dataset/deletion_rules.csv` | Data-category actions and conditions: DELETE, REDACT, ANONYMIZE, or RETAIN. |
+| `dataset/sample_deletion_requests.csv`, `dataset/sample_output.csv` | Public sample inputs and comparison answers used by `code/evaluation/run_eval.py`. |
+
+No hidden organizer truth is read by the prediction pipeline. Evidence files are normalized once and cached within a process; activity rows are loaded and reused.
+
+### 3. End-to-end flow
+
+```mermaid
+flowchart TD
+    REQ[deletion_requests.csv] --> ING[Load and validate input schemas]
+    UID[user_identities.csv] --> ID[Resolve subject identity]
+    AUD[user_audit_log.csv] --> ID
+    REQ --> ID
+    ID --> CUT[Build typed identifiers known by audit_at]
+    CUT --> CLASS{Does request text authorize deletion?}
+    CLASS -->|No| NA[NOT_APPLICABLE with empty steps]
+    CLASS -->|Yes| RET[Retrieve subject-linked records and activity]
+    MAN[evidence_files.csv manifest] --> EX[Extract participant evidence]
+    FILES[JSON SQL logs text PDF screenshots] --> EX
+    OCR[Tesseract local OCR] --> EX
+    API[Optional OpenAI transcription] --> EX
+    EX --> LINK[Match typed IDs and grounded resource links]
+    RET --> LINK
+    ACT[Global system_activity.csv] --> LINK
+    LINK --> STATE[Reconstruct state at audit_at]
+    STATE --> RULE[Apply category condition and required action]
+    RULE --> DEC{Any detected policy violation or recreation risk?}
+    DEC -->|No| COMPLETE[COMPLETE and evidence-backed verification steps]
+    DEC -->|Yes| INCOMPLETE[INCOMPLETE findings, remediation plan, future checks]
+    NA --> SORT[Order, serialize, validate]
+    COMPLETE --> SORT
+    INCOMPLETE --> SORT
+    SORT --> OUT[Root output.csv]
+```
+
+The OpenAI node is optional; the latest full run used Tesseract only. OCR output is text evidence, not a control channel. The API prompt asks for literal transcription, and the program does not run OCR output as a shell command or tool instruction.
+
+### 4. What happens at each stage
+
+1. **Load inputs.** `code/ingest.py` reads the CSV files and checks key column layouts. `code/config.py` anchors dataset and output paths to the repository root.
+2. **Resolve identity.** `code/identity_resolver.py` first looks up the request email case-insensitively in the current identity snapshot; if it is not present, it looks for that email in the identity audit log. Once a user ID is found, it collects historical emails, phones, and hashes. The retrieval set excludes names and is intended to include only values known by `audit_at`; the request email itself is retained as a key.
+3. **Classify request intent.** `code/request_classifier.py` uses deterministic regular expressions, not an LLM. Explicit non-deletion requests such as export/access/correction or an explicit negation short-circuit to `NOT_APPLICABLE` and `[]`. Deletion words plus recognized category terms can produce a partial scope; otherwise the request is considered full deletion. Identity resolution happens before this short-circuit, but evidence retrieval does not.
+4. **Extract evidence.** `code/evidence_extraction.py` reads supported files. SQL snapshots are loaded into in-memory SQLite; JSON, logs, handover text, and PDFs use deterministic parsers. Screenshots are transcribed locally with Tesseract by default. In `OPENAI_OCR_MODE=auto`, a configured API key allows the OpenAI transcription path when local OCR is empty or below its confidence threshold; `local` disables cloud OCR; `openai` sends every image for text transcription. Provider calls, when they occur, record model and provider-reported tokens in `code/evaluation/ocr_usage.jsonl`.
+5. **Retrieve and link.** `code/evidence_retrieval.py` matches typed IDs with token boundaries, filters evidence captures/observations and activities at the case cutoff, then expands through resource IDs connected to identity-matched evidence or activity. This lets activity provide a grounded bridge to artifacts that contain no email, such as object-storage evidence.
+6. **Reconstruct state.** `code/state_reconstruction.py` groups evidence by `(system_id, resource_id)` and chooses a latest eligible observation; it can add active data-flow or restore findings from affirmative checks. An operation result alone is not interpreted as final absence.
+7. **Apply policy.** `code/policy_engine.py` maps each extracted category/state to a finding/remediation/verification operation. Examples: a PRESENT DELETE resource gives a remaining-record finding; a PRESENT REDACT resource gives exposed-PII finding; attributable analytics can require anonymization; an ACTIVE connector must be disabled; a restorable backup must be blocked while retaining the archive; retained security/legal records are not treated as deletion targets when policy says RETAIN.
+8. **Decide status.** `code/status_decision.py` returns `NOT_APPLICABLE` for non-deletion classification, `INCOMPLETE` if any evaluated resource is marked a problem, and otherwise `COMPLETE`.
+9. **Generate steps.** For `INCOMPLETE`, `code/step_generator.py` emits evidence-backed findings, then proposed remediation, then future verification with empty evidence IDs. For `COMPLETE`, it emits verification steps citing the selected evidence. `NOT_APPLICABLE` emits `[]`.
+10. **Order, validate, write.** `code/ordering.py` sorts by phase, operation priority, system ID, then resource ID, and renumbers from 1. `code/validator.py` checks columns, row count, case IDs, order, JSON, fields, allowed enums, operation/phase/state compatibility, and membership of citations in the allowed ID set. `code/main.py` writes root `output.csv` only after validation passes.
+
+### 5. Case scenarios and expected pipeline behavior
+
+| Scenario | Intended output behavior | Current implementation behavior / caveat |
+|---|---|---|
+| Text asks only for access, export, correction, opt-out, or explicitly says not to delete | `NOT_APPLICABLE`, `steps_json=[]`; no evidence search or deletion plan | Regex-only intent detection can miss negation, multilingual phrasing, or a mixed request. |
+| Request authorizes full deletion | Inspect the subject's eligible identifiers across relevant systems and categories | A request is still treated as authorized from keywords; no confidence/clarification state exists. |
+| Request asks to delete one named category | Audit only that category and its related resources | If deletion is detected but no recognized scope is found, `scope` is empty and the code does not filter resources, effectively behaving like full scope. |
+| Identity is not resolved or retrieval returns no records | Should not assert success without adequate search coverage; a complete result requires evidence-backed verification | Current status logic treats an empty evaluated-resource list as `COMPLETE`; step generation then emits `[]`. In the final output, 210 of 289 COMPLETE rows have empty steps. This is a major false-completion risk and a contract weakness. |
+| Evidence shows a record that policy says DELETE remains PRESENT | `INCOMPLETE`; cite the finding; propose `DELETE_RECORD`; then verify absence | Depends on artifact parsing and identity/resource linking being correct and comprehensive. |
+| Evidence shows prohibited identifiers in a REDACT/ANONYMIZE record | `INCOMPLETE`; report exposed PII; propose the required treatment and future verification | State/direct-identifier recognition varies by file parser and can misclassify unusual fields. |
+| Evidence proves a required record is absent or already compliant | `COMPLETE` with evidence-backed verification for each relevant resource | If the parser does not create a resource record to represent absence, no verification step is generated. |
+| A policy-retained security/legal record is present | Preserve it and verify presence where the policy condition applies | If required retained evidence is missing, current allowed operations have no explicit “missing retained record” finding; the engine currently does not report it as a present record. |
+| An account tombstone should remain with only stable subject reference | Preserve stable `user_id`; remove name/email/phone/hash/direct identifiers per policy | Hash/name detection is not uniform across all parsers; a tombstone may be incorrectly treated as compliant. |
+| A connector is affirmatively ACTIVE or a backup can still be restored | `INCOMPLETE`; stop the flow/block restore before dependent record remediation; verify blocked/disabled | State reconstruction recognizes selected positive check phrases. Later disable/block activity is not comprehensively folded into state, and dependencies are not modeled as a graph. |
+| Workflow reports deletion success but a later eligible replica/evidence row shows data | The current row-level evidence should control the result; report the remaining record | Equal-time conflicting states use a fixed rank that favors PRESENT over ABSENT; no authoritative source-priority or conflict adjudication exists. |
+| OCR image contains instructions such as “ignore previous instructions” | Treat those pixels as untrusted text; never execute them or treat them as policy | Local Tesseract does not follow instructions. The OpenAI path is prompted to transcribe only but was not live-tested; transcription may still hallucinate or misread. |
+
+### 6. Output details and run commands
+
+- Full prediction: `python3 code/main.py` writes the 518-case root `output.csv`.
+- Public sample metrics: `python3 code/evaluation/run_eval.py` reads sample files and does not itself write the full output.
+- **Caution:** `python3 code/main.py --sample` selects the 32 sample requests but still writes to the configured root output path; running it after the full run replaces the full 518-row `output.csv` with sample output.
+- Current measured public sample: status 78.12% (25/32), exact ordered sequence 12.50% (4/32), field accuracy 30.02%. These are weak semantic results even though the full file passes structural checks.
+- Final full output status counts: 289 COMPLETE, 197 INCOMPLETE, 32 NOT_APPLICABLE. The 210 empty-step COMPLETE rows are included in that status count.
+- The output validator establishes structural validity and citation-ID membership. It does not independently prove that a cited file supports the stated resource, that the resource search is exhaustive, or that every COMPLETE case has a verification step.
+
+### 7. Current weaknesses, ordered by submission risk
+
+| Severity | Weakness | Concrete consequence |
+|---|---|---|
+| **Blocker** | Weak public sample sequence/field results: 12.50% exact sequence and 30.02% field accuracy; status accuracy is 78.12%. | The current logic often disagrees with the public expected evidence/step sequence; hidden-set semantic performance is uncertain and likely weak. |
+| **Blocker** | Vacuous COMPLETE cases: 210 of the 289 COMPLETE output rows have `steps_json=[]`. | The program can treat no retrieved resources as proof that deletion is complete, contrary to evidence-backed verification requirements. |
+| **High** | Evidence search is not proven exhaustive and the validator does not require a non-empty verification plan for COMPLETE. | Missing identity joins, unsupported file formats, parse failures, or missed resource links can become false completion without a structural error. |
+| **High** | Request classification and partial-scope extraction are regex heuristics with no review/uncertain result. | Negation, mixed intent, multilingual variants, or an unrecognized category can become the wrong status or unintended full-scope audit. The prompt constant is unused. |
+| **High** | Policy conditions have permissive fallbacks. For SUPPORT_MESSAGE, a PRESENT state alone makes the shared-context condition apply; for SUPPORT_ATTACHMENT, missing ownership facts default to “subject only.” | Shared or mixed records may be redacted/deleted under an unsupported assumption. Conditional retention may also be incorrectly routed. |
+| **High** | State conflicts and activity transitions are incomplete. Equal-time evidence tie-break favors PRESENT; later DISABLE_DATA_FLOW/BLOCK_RESTORE events are not comprehensively incorporated. | False positive incomplete findings or stale recreation risks may survive even after later evidence changes state. |
+| **High** | Downstream/source dependencies are not modeled explicitly. Ordering is phase/operation/system/resource sort. | A deterministic plan does not prove downstream copies are remediated before their source, as the challenge requires for dependency-sensitive systems. |
+| **High** | Evidence citations are validated only for membership in the global allowed-ID set. | A valid `evidence_id` can still fail to prove the cited subject/resource/state/cutoff; semantic citation correctness is unchecked. |
+| **High** | OpenAI OCR mode has not been called or integration-tested with a real API key. Tesseract confidence is not OCR accuracy. | The cloud fallback, provider errors, billing totals, image misreads, and API prompt-injection resilience remain unverified. |
+| **Medium** | Broad exception handling in some JSON/PDF parsers can skip malformed artifacts without failing the run. | Evidence coverage can silently shrink; output validation may still pass. |
+| **Medium** | Custom tests are small component checks; the identity-cutoff custom case checks a local filtering expression rather than exercising the full resolver/retriever. | Passing tests do not establish end-to-end behavior for the 518-case population or policy matrix. |
+| **Medium** | `--sample` writes to root `output.csv`. | A sample run can overwrite the complete submission output unless the operator reruns the full pipeline. |
+| **Packaging** | At this review, the local worktree has modified `.DS_Store` and `code.zip` files. The local archive contains `__MACOSX` metadata entries (no dataset or nested archive) and differs from the last committed archive. | The local archive and GitHub copy may not be the same artifact. Rebuild a clean archive and compare it with the intended upload before submission. These workspace changes are not silently discarded by this documentation update. |
+
+This weakness list describes observed implementation gaps, not hypothetical guarantees. Structural checks are useful but do not make the submission semantically complete or “bug-free.”
+
+---
+
 ## Phase 0 — Planning (decisions made before any code, during design discussion)
 
 ### [D-1] Pipeline split: LLM-only-for-extraction, deterministic-everything-else
@@ -377,3 +495,12 @@ This file is append-only in spirit: never delete or rewrite a past entry, even i
 - Alternatives considered: Submit a prior output without image text, or call the project fully accurate because CSV validation passed.
 - What would have happened with the alternative: The first leaves screenshot evidence unread; the second confuses structural validity with semantic correctness and overstates expected hidden-set performance.
 - Status: ACTIVE; supersedes prior full-output counts and OCR coverage notes in [D-27]
+
+### [D-32] Document the end-to-end project flow and observed submission weaknesses
+- Phase: 13 (Full Run and Final Audit)
+- Date/step: Code, reports, and current output review / 2026-10-25
+- Decision: Add a reader-oriented project guide describing inputs, processing stages, outcomes for major case scenarios, output validation, and the current risk-ranked weaknesses. Record that the latest output has 210 of 289 `COMPLETE` rows with empty step arrays, and that public sample status, sequence, and field accuracy are 78.12%, 12.50%, and 30.02% respectively.
+- Why: Structural validation alone does not prove evidence coverage or semantic correctness; reviewers need an accurate description of what the implementation actually does and where it can fail.
+- Alternatives considered: Treat a successful full run and valid CSV as proof of readiness, or replace the historical decisions with a rewritten summary.
+- What would have happened with the alternative: The first would conceal vacuous completion and weak sample agreement; the second would erase the audit trail and make prior decisions harder to interpret.
+- Status: ACTIVE
