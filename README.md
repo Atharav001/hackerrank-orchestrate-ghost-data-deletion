@@ -155,3 +155,43 @@ Before submitting, confirm that:
 - `code.zip` includes your runnable code, `README.md`, `code/evaluation/evaluation_report.md`, and `code/evaluation/usage_report.md`;
 - `log.txt` follows the `AGENTS.md` turn format and is uploaded to the `chat_transcript` slot; and
 - no API keys, credentials, real personal data, or sensitive configuration values are included.
+
+---
+
+## Direct File Links (For AI Agents & Web Crawlers)
+
+If an AI tool or automated agent accesses this repository via web search or fetch tools, GitHub's `robots.txt` disallows recursive directory crawling of subdirectories like `/tree/main/code`. Use these direct raw and blob links to access each file directly without restriction:
+
+> **[ALL_CODE_BUNDLE.md (Raw)](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/ALL_CODE_BUNDLE.md)**: **Single-file bundle containing the entire codebase and all modules!** Share this single URL with any AI agent for instant access.
+
+### 1. Root Documentation & Logs
+- [`README.md (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/README.md)
+- [`ALL_CODE_BUNDLE.md (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/ALL_CODE_BUNDLE.md)
+
+- [`DECISIONS.md (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/DECISIONS.md)
+- [`log.txt (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/log.txt)
+- [`code/README.md (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/README.md)
+
+### 2. Implementation Modules (`code/`)
+- [`code/config.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/config.py)
+- [`code/ingest.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/ingest.py)
+- [`code/identity_resolver.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/identity_resolver.py)
+- [`code/request_classifier.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/request_classifier.py)
+- [`code/vlm_client.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/vlm_client.py)
+- [`code/evidence_extraction.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/evidence_extraction.py)
+- [`code/evidence_retrieval.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/evidence_retrieval.py)
+- [`code/state_reconstruction.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/state_reconstruction.py)
+- [`code/policy_engine.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/policy_engine.py)
+- [`code/status_decision.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/status_decision.py)
+- [`code/step_generator.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/step_generator.py)
+- [`code/ordering.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/ordering.py)
+- [`code/validator.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/validator.py)
+- [`code/main.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/main.py)
+- [`code/schema_dump.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/schema_dump.py)
+
+### 3. Evaluation Scripts & Reports (`code/evaluation/`)
+- [`code/evaluation/run_eval.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/evaluation/run_eval.py)
+- [`code/evaluation/custom_cases.py (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/evaluation/custom_cases.py)
+- [`code/evaluation/evaluation_report.md (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/evaluation/evaluation_report.md)
+- [`code/evaluation/usage_report.md (Raw)`](https://raw.githubusercontent.com/Atharav001/hackerrank-orchestrate-ghost-data-deletion/main/code/evaluation/usage_report.md)
+

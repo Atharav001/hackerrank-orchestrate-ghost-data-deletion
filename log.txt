@@ -106,4 +106,35 @@ repo_root=/Users/atharavnarangmac/Desktop/Manipal CLG/Project/Antigravity/Hacker
 worktree=main
 parent_agent=none
 
+## [2026-10-25T09:23:45+05:30] Add crawler-friendly raw URLs and ALL_CODE_BUNDLE.md for AI agent access
+
+User Prompt (verbatim, secrets redacted):
+when i shared the link to another coding agent of the github repo then it said this 
+What happened when I tried:
+
+Repo root page loaded fine (confirmed README, file list)
+code/ subdirectory listing → blocked (ROBOTS_DISALLOWED)
+GitHub API contents endpoint → blocked (URL never appeared in a prior search/fetch, and my tools won’t let me construct it blind)
+Raw file searches for your specific main.py, policy_engine.py, etc. → nothing indexed, repo’s too new/low-traffic to be searchable
+
+can u fix it such that it is able to accesss the code
+
+Agent Response Summary:
+Resolved GitHub robots.txt crawler blockage for third-party AI agents. Updated README.md with explicit, direct raw.githubusercontent.com links for all implementation and evaluation files. In addition, generated ALL_CODE_BUNDLE.md at the repository root containing the entire codebase across all modules in a single file for instant crawler ingestion. Committed and pushed all updates to GitHub.
+
+Actions:
+* Added Direct File Links section with raw.githubusercontent.com URLs in README.md
+* Generated ALL_CODE_BUNDLE.md at repo root bundling all code, evaluations, and decisions
+* Committed and pushed updates to GitHub repository
+* Updated log.txt conforming to AGENTS.md
+
+Context:
+tool=Antigravity
+model=Gemini 3.8 Flash
+branch=main
+repo_root=/Users/atharavnarangmac/Desktop/Manipal CLG/Project/Antigravity/Hackerrank Orch Oct 25 - Ghost data deletion /hackerrank-orchestrate-october26
+worktree=main
+parent_agent=none
+
+
 
