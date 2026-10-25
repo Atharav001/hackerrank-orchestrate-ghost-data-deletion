@@ -287,3 +287,66 @@ This file is append-only in spirit: never delete or rewrite a past entry, even i
 - Why: An unparsed image can otherwise turn a remaining record into a false COMPLETE result.
 - Status: ACTIVE
 
+
+### [D-22] Bound identity reconstruction to the audit cutoff
+- Phase: 2–4 (Identity Resolution and Evidence Retrieval)
+- Date/step: Full-dataset hardening / 2026-10-25
+- Decision: Evidence retrieval uses current and historical typed identifiers while excluding identity-history changes after the case's `audit_at`. Record observations and evidence captures must also be at or before that cutoff.
+- Why: A later email or phone change cannot be used to rewrite what was discoverable at the historical audit time; post-cutoff evidence must not change the answer.
+- Alternatives considered: Search with the complete identity history as it exists now.
+- What would have happened with the alternative: Later identifiers could join unrelated later records to an earlier case and retroactively change its findings.
+- Status: ACTIVE; refines [D-2] and [D-9]
+
+### [D-23] Reconstruct SQL snapshot records through SQLite
+- Phase: 5–6 (Evidence Extraction and State Reconstruction)
+- Date/step: Full-dataset hardening / 2026-10-25
+- Decision: Execute SQLite-compatible SQL snapshots in an in-memory SQLite database, then classify rows using collection/table names and row-level facts, including resource IDs, direct identifiers, states, and observation timestamps.
+- Why: Parsing SQL text by splitting commas or assigning a category from the file name can corrupt quoted fields and misclassify records from mixed-system snapshots.
+- Alternatives considered: Keep line-oriented SQL parsing and one default category per file.
+- What would have happened with the alternative: Commas and quoting in values could shift columns, while search, analytics, support, and replica rows could be evaluated under the wrong deletion rule.
+- Status: ACTIVE; supersedes the broad parser completeness claim in [D-10]
+
+### [D-24] Treat operational activity as a state claim unless it proves a risk check
+- Phase: 6 (State Reconstruction)
+- Date/step: Full-dataset hardening / 2026-10-25
+- Decision: Do not accept a successful deletion operation alone as proof that a resource is absent. Affirmative `CHECK_DATA_FLOW` and `CHECK_RESTORE_ACCESS` details can establish active recreation risks when they are current at the audit cutoff and not superseded by later state evidence.
+- Why: Workflow results are claims, while explicit check details can describe continuing sync or restore capability.
+- Alternatives considered: Treat every successful operation as final state, or treat every historical risk check as still active.
+- What would have happened with the alternative: The first choice misses ghost data; the second reports stale risks after later evidence shows the process is disabled or restore is blocked.
+- Status: ACTIVE; refines [D-11]
+
+### [D-25] Apply rule conditions and avoid inventing absent retained records
+- Phase: 7 (Policy Engine)
+- Date/step: Full-dataset hardening / 2026-10-25
+- Decision: Policy evaluation consults the supplied category condition and extracted record facts. An absent record governed by `RETAIN` is not emitted as a present finding or converted into a deletion action, because the allowed output operations contain no finding for missing retained records.
+- Why: Policy conditions determine whether delete, redact, anonymize, or retain applies; output states and operations must describe evidence rather than invent it.
+- Alternatives considered: Apply only the category's action unconditionally, or report an absent retained record as `REPORT_REMAINING_RECORD`.
+- What would have happened with the alternative: The first can over-delete conditionally retained records; the second claims a record is present when it is absent and proposes the opposite of the retention rule.
+- Status: ACTIVE; supersedes the missing-retention assumption in [D-12]
+
+### [D-26] Preserve image artifacts when OCR is unavailable, with explicit uncertainty
+- Phase: 5 (Evidence Extraction)
+- Date/step: Full-dataset execution / 2026-10-25
+- Decision: Attempt local image OCR, but when macOS Vision fails (`nilError`) and Tesseract is unavailable, keep each image represented as `IMAGE_CONTENT_UNVERIFIED` and do not claim its text was inspected. The sample and usage reports disclose this limitation.
+- Why: Silent image omission hides a known coverage gap, while fabricated OCR text would create unsupported findings and false evidence claims.
+- Alternatives considered: Fail the entire run, silently drop image artifacts, or call a paid vision provider.
+- What would have happened with the alternative: A hard failure would prevent generation of the required full output; silent dropping would hide risk; a paid model call would change usage and require credentials/provider configuration not present in this run.
+- Status: ACTIVE; supersedes the “OCR when available” implication of [D-21] for this runtime
+
+### [D-27] Report measured sample accuracy and submission readiness honestly
+- Phase: 12–13 (Evaluation and Final Audit)
+- Date/step: Final sample and full run / 2026-10-25
+- Decision: The latest public sample evaluation is status accuracy 78.12% (25/32), exact sequence accuracy 12.50% (4/32), and field accuracy 30.02%. The full run produced 518 rows and passed structural/citation validation, but this evidence does not establish semantic correctness or submission readiness.
+- Why: Sample metrics are materially weak and must not be hidden behind a successful CSV schema check or described as “bug-free.”
+- Alternatives considered: Declare ready based only on row count and valid JSON, or tune output to case IDs and sample labels.
+- What would have happened with the alternative: The first overstates confidence; the second violates evidence-based prediction rules and risks poor hidden-set performance.
+- Status: ACTIVE; supersedes the obsolete sample metrics and readiness interpretation in [D-18]
+
+### [D-28] Publish the generated deliverables to the configured GitHub repository
+- Phase: 13 (Full Run and Final Audit)
+- Date/step: Commit `bbcb4fa` / 2026-10-25
+- Decision: Commit the source changes, README, measured evaluation/usage reports, `output.csv`, `code.zip`, and the current `log.txt` to the configured `main` branch on GitHub. Keep the archive free of the dataset, secrets, and nested archives.
+- Why: The user explicitly requested the code and generated artifacts be updated on GitHub and ready for review.
+- Alternatives considered: Leave artifacts only in the local workspace.
+- What would have happened with the alternative: The remote repository would not contain the generated submission output or the code archive requested for handoff.
+- Status: ACTIVE

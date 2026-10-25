@@ -273,3 +273,24 @@ branch=main
 repo_root=/Users/atharavnarangmac/Desktop/Manipal CLG/Project/Antigravity/Hackerrank Orch Oct 25 - Ghost data deletion 
 worktree=/Users/atharavnarangmac/Desktop/Manipal CLG/Project/Antigravity/Hackerrank Orch Oct 25 - Ghost data deletion 
 parent_agent=none
+
+## [2026-10-25T18:10:15+05:30] Record latest decisions and assess readiness
+
+User Prompt (verbatim, secrets redacted):
+make sure all the new decisions have been also added in same format in the decisions md file also
+r we ready to submit?
+
+Agent Response Summary:
+Appended decisions D-22 through D-28 to DECISIONS.md using the existing template, covering cutoff-aware identity joins, SQLite evidence parsing, activity risk interpretation, policy conditions, unavailable OCR, measured sample quality/readiness, and GitHub publication. Readiness remains qualified: the 518-row file passes structural checks, but sample status/sequence/field metrics and image OCR limitations mean semantic submission quality is not established.
+
+Actions:
+* Appended decisions to DECISIONS.md.
+* Checked formatting and git status.
+
+Context:
+tool=Codex desktop
+model=gpt-6-luna
+branch=main
+repo_root=/Users/atharavnarangmac/Desktop/Manipal CLG/Project/Antigravity/Hackerrank Orch Oct 25 - Ghost data deletion 
+worktree=/Users/atharavnarangmac/Desktop/Manipal CLG/Project/Antigravity/Hackerrank Orch Oct 25 - Ghost data deletion 
+parent_agent=none
