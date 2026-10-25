@@ -4,12 +4,14 @@ from typing import Dict, Any, List
 from ingest import load_deletion_rules
 
 _RULES_CACHE = None
+_CONDITIONS_CACHE = None
 
 def get_rules_map() -> Dict[str, str]:
-    global _RULES_CACHE
+    global _RULES_CACHE, _CONDITIONS_CACHE
     if _RULES_CACHE is None:
         df = load_deletion_rules()
         _RULES_CACHE = {row["data_category"]: row["required_action"] for _, row in df.iterrows()}
+        _CONDITIONS_CACHE = {row["data_category"]: str(row["condition"]) for _, row in df.iterrows()}
     return _RULES_CACHE
 
 def evaluate_resource_policy(resource: Dict[str, Any]) -> Dict[str, Any]:
@@ -33,8 +35,8 @@ def evaluate_resource_policy(resource: Dict[str, Any]) -> Dict[str, Any]:
     verification_op = None
     verification_state = None
 
-    # Handle DATA_FLOW active risk
-    if data_cat == "DATA_FLOW" or "data_flow" in res_id:
+    # Flow and restore are still governed by the CSV action; their state adds a risk.
+    if data_cat == "DATA_FLOW":
         if state == "ACTIVE":
             classification = "PROBLEM"
             finding_op = "REPORT_ACTIVE_DATA_FLOW"
@@ -49,7 +51,7 @@ def evaluate_resource_policy(resource: Dict[str, Any]) -> Dict[str, Any]:
             verification_state = "DISABLED"
 
     # Handle BACKUP_ARCHIVE restore risk
-    elif data_cat == "BACKUP_ARCHIVE" or "backup" in res_id:
+    elif data_cat == "BACKUP_ARCHIVE":
         if state == "ACTIVE":
             classification = "PROBLEM"
             finding_op = "REPORT_RESTORE_RISK"

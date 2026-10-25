@@ -74,6 +74,47 @@ Produce exactly one row per request. `deletion_status` is `COMPLETE`, `INCOMPLET
 
 The final file must contain 518 data rows sorted by `case_id` (plus the header row). The grader parses `steps_json` as JSON, so object-key order and whitespace do not matter; array order does. Order findings, remediation, and verification in that phase order. Within a phase, follow the operation order in the problem statement, then sort by `system_id` and `resource_id`.
 
+## How the audit works
+
+```mermaid
+flowchart TD
+    A[deletion_requests.csv] --> B[Ingest and validate schemas]
+    B --> C[Resolve current and historical identifiers]
+    C --> D{Does the text authorize deletion?}
+    D -- No: access, export, correction, opt-out --> N[NOT_APPLICABLE\nsteps_json=[]]
+    D -- Yes: full or scoped --> E[Retrieve evidence and activity <= audit_at]
+    E --> F[Parse JSON, SQL, logs, TXT, PDF, image OCR]
+    F --> G[Reconstruct latest state and active sync/restore risks]
+    G --> H[Apply deletion_rules.csv condition + action]
+    H --> I{Every relevant record compliant?}
+    I -- Yes --> J[COMPLETE\nverification evidence only]
+    I -- No --> K[INCOMPLETE\nfindings -> remediation -> future verification]
+    J --> L[Numeric case ordering + contract validation]
+    K --> L
+    N --> L
+    L --> M[output.csv]
+```
+
+### Data-flow and decision semantics
+
+```mermaid
+flowchart LR
+    R[Request: email, text, audit_at] --> ID[Identity graph\ncurrent + historical email/phone/hash/user_id]
+    ID --> EV[Evidence manifest + artifacts]
+    ID --> AC[Global activity stream]
+    EV --> ST[State at audit_at]
+    AC --> ST
+    ST --> POL[Policy action by data_category\nDELETE / REDACT / ANONYMIZE / RETAIN]
+    POL -->|state violates policy| FIND[Evidence-backed finding]
+    FIND --> REM[Ordered remediation\nstop flows/block restore first]
+    REM --> VER[Empty-evidence future checks]
+    POL -->|state satisfies policy| PROOF[Evidence-backed verification]
+    PROOF --> OUT[COMPLETE]
+    VER --> OUT2[INCOMPLETE]
+```
+
+For a request that does not authorize deletion, the pipeline stops after classification and emits `NOT_APPLICABLE` with `[]`; it does not manufacture deletion work. For an authorized request, current and historical identifiers are joined to participant-visible evidence only at or before `audit_at`. A record that should be deleted but remains is reported with `REPORT_REMAINING_RECORD`; exposed identifiers in a retained record use `REPORT_EXPOSED_PII`; active synchronization uses `REPORT_ACTIVE_DATA_FLOW`; and an unsafe restore path uses `REPORT_RESTORE_RISK`. The remediation order disables flows and blocks restores before deleting, redacting, or anonymizing dependent records. A `COMPLETE` case contains only evidence-backed verification steps. An `INCOMPLETE` case contains evidence-backed findings, then future remediation steps with empty `evidence_id`, then future verification steps with empty `evidence_id`.
+
 ---
 
 ## Evaluation

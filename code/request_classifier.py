@@ -28,49 +28,40 @@ def _log_usage(case_id: str, model: str, input_tokens: int, output_tokens: int):
     with open(USAGE_LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
 
-def classify_request(request_text: str, case_id: str = "") -> str:
+def classify_request_with_scope(request_text: str, case_id: str = "") -> Tuple[str, str]:
     """
     Stage 3 — Request Classification:
     Determines if request is FULL_DELETION_REQUEST, PARTIAL_DELETION_REQUEST, or NOT_A_DELETION_REQUEST.
     """
-    # Defensive heuristic / fast classifier (also serves as fallback if no LLM API key configured)
     text_lower = request_text.lower().strip()
-    
-    # Check for explicit non-deletion authorization
-    non_deletion_indicators = [
-        'leave the account active', 'keep the account as it is',
-        'leave my profile', 'continue using the service',
-        'keep my account', 'do not delete', 'keep the account active',
-        'portable format', 'download my account information',
-        'copy of last year', 'invoices for my records'
-    ]
-    
-    # Check if user explicitly wants account left active / no deletion
-    for indi in non_deletion_indicators:
-        if indi in text_lower:
-            _log_usage(case_id, "heuristic-classifier", len(request_text.split()), 1)
-            return "NOT_A_DELETION_REQUEST"
-            
-    # Try calling LLM if API key exists in environment
-    api_key_openai = os.environ.get("OPENAI_API_KEY")
-    api_key_gemini = os.environ.get("GEMINI_API_KEY")
-    api_key_anthropic = os.environ.get("ANTHROPIC_API_KEY")
-    
-    if api_key_openai or api_key_gemini or api_key_anthropic:
-        # LLM integration point
-        try:
-            # If an external client is configured, call it here
-            pass
-        except Exception:
-            pass
+    deletion = re.search(r"(delet\w*|eras\w*|remov\w*|forget\w*|clos\w*|supprim\w*|elimin\w*|lösch\w*|削除)", text_lower)
+    negated = re.search(r"\b(?:do not|don't|never)\s+(?:delete|remove|erase)|\b(?:keep|leave|retain)\b.{0,30}\b(?:delete|remove|erase)\b", text_lower)
+    non_deletion = re.search(r"\b(export|download|access|copy|correct|update|change|replace|invoice|marketing|unsubscribe|opt.?out|portable)\b", text_lower)
+    if (not deletion) or negated or (non_deletion and not re.search(r"\b(delete|erase|remove|forget|close)\b", text_lower)):
+        result = ("NOT_A_DELETION_REQUEST", "")
+    else:
+        partial_terms = {
+            "USER_PROFILE": r"profile|account details|contact details|name|phone|email",
+            "SUPPORT_MESSAGE": r"support|conversation|ticket|message",
+            "SUPPORT_ATTACHMENT": r"attachment|document",
+            "ANALYTICS_PROFILE": r"analytics|analytics profile",
+            "MARKETING_PROFILE": r"marketing|advertising",
+            "USER_EXPORT": r"export|downloaded file",
+            "SEARCH_INDEX_ENTRY": r"search index|search result",
+            "EMAIL_DELIVERY_LOG": r"email log|delivery log",
+        }
+        scope = next((cat for cat, pat in partial_terms.items() if re.search(pat, text_lower)), "")
+        result = ("PARTIAL_DELETION_REQUEST", scope) if scope and not re.search(r"\b(all|everything|entire|full|account and all)\b", text_lower) else ("FULL_DELETION_REQUEST", "")
+    _log_usage(case_id, "deterministic-classifier", len(request_text.split()), 1)
+    return result
 
-    # Default to FULL_DELETION_REQUEST for legitimate privacy deletion requests
-    _log_usage(case_id, "classification-engine", len(request_text.split()), 1)
-    return "FULL_DELETION_REQUEST"
+def classify_request(request_text: str, case_id: str = "") -> str:
+    return classify_request_with_scope(request_text, case_id)[0]
 
 def test_request_classifier():
     # Test case 1: Full deletion request
     assert classify_request("Please delete my account and all data", "case_test_1") == "FULL_DELETION_REQUEST"
+    assert classify_request("Delete only my marketing profile", "case_test_partial") == "PARTIAL_DELETION_REQUEST"
     # Test case 2: Keep account active
     assert classify_request("The mobile number on my profile is out of date. Please replace it with the new one and leave the account active.", "case_533") == "NOT_A_DELETION_REQUEST"
     # Test case 3: Download only

@@ -36,8 +36,14 @@ def reconstruct_state_for_case(
         target_sys = ar.get("target_system")
         res_result = ar.get("reported_result")
 
-        # If data flow or restore is checked and active
-        if evt_type == "CHECK_DATA_FLOW" and "remains enabled" in str(ar.get("details", "")).lower():
+        details = str(ar.get("details", "")).lower()
+        result = str(res_result or "").lower()
+        flow_event = str(evt_type or "").upper() in {"CHECK_DATA_FLOW", "SYNC", "IMPORT", "DATA_FLOW"}
+        restore_event = str(evt_type or "").upper() in {"CHECK_RESTORE_ACCESS", "RESTORE", "BACKUP_RESTORE"}
+        flow_active = result in {"ACTIVE", "ENABLED", "RUNNING", "SUCCESS"} or any(x in details for x in ("remains enabled", "enabled=true", "active", "running"))
+        restore_active = result in {"ACTIVE", "ENABLED", "ALLOWED", "RUNNING", "SUCCESS"} or any(x in details for x in ("remains active", "restore_allowed=true", "allowed"))
+        # Treat structured flow/restore events as risks; free text is only a fallback.
+        if flow_event and flow_active:
             key = (target_sys, res_id)
             if key not in resources or resources[key]["state"] != "DISABLED":
                 resources[key] = {
@@ -51,7 +57,7 @@ def reconstruct_state_for_case(
                     "identifiers": set(),
                     "details": ar.get("details")
                 }
-        elif evt_type == "CHECK_RESTORE_ACCESS" and "remains active" in str(ar.get("details", "")).lower():
+        elif restore_event and restore_active:
             key = (target_sys, res_id)
             if key not in resources or resources[key]["state"] != "BLOCKED":
                 resources[key] = {

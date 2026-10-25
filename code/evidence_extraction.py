@@ -8,6 +8,28 @@ from config import DATASET_DIR, EVIDENCE_FILES_PATH
 
 _EVIDENCE_CACHE = None
 
+def _parse_sql_values(value_text: str) -> List[str]:
+    """Parse one SQL VALUES tuple without splitting commas inside quoted text."""
+    values, buf, quote, i = [], [], None, 0
+    while i < len(value_text):
+        ch = value_text[i]
+        if quote:
+            if ch == quote:
+                if i + 1 < len(value_text) and value_text[i + 1] == quote:
+                    buf.append(quote); i += 2; continue
+                quote = None
+            else:
+                buf.append(ch)
+        elif ch in "'\"":
+            quote = ch
+        elif ch == ',':
+            values.append(''.join(buf).strip()); buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    values.append(''.join(buf).strip())
+    return values
+
 def _clean_str(val: Any) -> str:
     if val is None or pd.isna(val):
         return ""
@@ -294,7 +316,7 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
                             if m:
                                 table_name = m.group(1)
                                 vals_str = m.group(2)
-                                raw_vals = [v.strip().strip("'\"") for v in vals_str.split(",")]
+                                raw_vals = [v.strip() for v in _parse_sql_values(vals_str)]
                                 if not raw_vals:
                                     continue
                                 res_id = raw_vals[0]
@@ -302,7 +324,7 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
                                 for v in raw_vals[1:]:
                                     cv = _clean_str(v)
                                     if cv and len(cv) >= 3 and cv.upper() not in ("NULL", "NONE", "ACTIVE", "DELETED", "BLOCKED", "ENABLED", "DISABLED", "0", "1"):
-                                        id_set.add(cv)
+                                        id_set.add(cv.strip("'\""))
 
                                 svc = "account_service"
                                 cat = "USER_PROFILE"
@@ -437,7 +459,24 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
             except Exception:
                 pass
 
-        # 5. PDF documents
+        # 5. PDFs and images. Images use local OCR when available; failures are
+        # represented as an explicit fail-safe record rather than disappearing.
+        elif ext in (".png", ".jpg", ".jpeg"):
+            try:
+                from PIL import Image
+                import pytesseract
+                visual_text = pytesseract.image_to_string(Image.open(full_path))
+            except Exception as exc:
+                visual_text = ""
+            emails = re.findall(r'[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9-.]+', visual_text)
+            ids = re.findall(r'user_\d+|(?:account|search|export|audit_record|support|analytics|backup|connector)_\d+', visual_text)
+            identifiers = set(emails + ids)
+            all_records.append({"evidence_id": eid, "file_path": rel_path, "captured_at": captured_at,
+                                "system_id": "visual_evidence", "resource_id": ids[0] if ids else f"visual_{eid}",
+                                "data_category": "USER_PROFILE", "state": "PRESENT" if identifiers else "PRESENT",
+                                "identifiers": identifiers, "details": visual_text or "Image could not be OCR-verified; manual review required."})
+
+        # 6. PDF documents
         elif ext == ".pdf":
             try:
                 import pypdf

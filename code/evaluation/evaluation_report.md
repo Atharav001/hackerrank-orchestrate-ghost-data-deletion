@@ -1,7 +1,7 @@
 # Evaluation Report: Ghost Data Deletion Audit Agent
 
 ## 1. Executive Summary
-This report is based on a **live re-run** of `code/evaluation/run_eval.py` on 2026-10-25 against `dataset/sample_deletion_requests.csv` and `dataset/sample_output.csv`. Earlier draft text that claimed 100% sample accuracy is withdrawn. The pipeline modules exist and run, but sample step matching is not submission-ready yet.
+This report is based on a **live re-run** of `code/evaluation/run_eval.py` on 2026-10-25 against `dataset/sample_deletion_requests.csv` and `dataset/sample_output.csv`. Earlier draft text that claimed 100% sample accuracy is withdrawn. The pipeline now compiles, extracts all manifest formats including image OCR, and produces a contract-valid 518-row full run; sample semantic matching still needs further tuning.
 
 ---
 
@@ -10,9 +10,9 @@ The sample evaluation dataset consists of 32 requests.
 
 | Metric | Target Requirement | Measured Result (live run) |
 | :--- | :--- | :--- |
-| **Case-level Status Accuracy** | 100% | **78.12% (25/32 cases)** |
+| **Case-level Status Accuracy** | 100% | **59.38% (19/32 cases)** |
 | **Sequence Accuracy** | >95% | **12.50% (4/32 cases)** |
-| **Field-level Accuracy** | >98% | **18.58%** |
+| **Field-level Accuracy** | >98% | **15.54%** |
 
 ### Metric Definitions:
 1. **Case-level Status Accuracy:** Percentage of requests correctly assigned to `COMPLETE`, `INCOMPLETE`, or `NOT_APPLICABLE`.
@@ -45,7 +45,7 @@ Three synthetic cases exist in `code/evaluation/custom_cases.py`. Live run of ca
 ### Case 1: `custom_edge_01` — Non-Deletion Request Handling
 - **Input Text:** `"Hi support, could you please send me a copy of my last three monthly invoices? I need them for tax filing purposes. Thanks!"`
 - **Expected Result:** `NOT_APPLICABLE`, `steps_json = []`
-- **Observed Result:** `COMPLETE` (classifier keyword list did not match this wording). **FAIL**
+- **Observed Result:** `NOT_APPLICABLE`, `[]`. **PASS**
 
 ### Case 2: `custom_edge_02` — Case-Insensitive Historical Identity
 - **Scenario:** Uppercase/historical email with possible failover replica leftovers.
@@ -62,9 +62,9 @@ These are the issues that must be fixed before packing `code.zip` and writing th
 
 1. **Absence proof for COMPLETE cases.** If a user’s account is gone from a snapshot, still emit `VERIFY_RECORD_ABSENT` citing that snapshot (`file_id`).
 2. **INCOMPLETE verification of the primary account.** Sample output still wants `VERIFY_RECORD_ABSENT` on `account_service` even when the finding is on another system.
-3. **Image evidence.** 11 of 94 files are `.png` and are currently skipped by `evidence_extraction.py`.
+3. **Image evidence.** 11 of 94 files are `.png`; they now pass through local OCR with an explicit fail-safe record when OCR is unavailable.
 4. **Request classification.** Keyword list is too narrow; LLM branch is unused. Non-deletion requests that are phrased differently become false audits.
 5. **Legal-hold / retained records.** Do not emit extra `VERIFY_RECORD_PRESENT` rows that sample output does not include.
 6. **Honest usage accounting.** No billed LLM/VLM calls occurred in this run.
 
-Until sample sequence accuracy is high, do not treat the 518-row hidden set as ready.
+The full run is contract-valid, but sample sequence accuracy remains a quality risk and should be improved before submission.

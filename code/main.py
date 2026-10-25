@@ -21,7 +21,7 @@ from ingest import (
     load_evidence_manifest
 )
 from identity_resolver import resolve_identity
-from request_classifier import classify_request
+from request_classifier import classify_request_with_scope
 from evidence_retrieval import retrieve_evidence_for_case
 from state_reconstruction import reconstruct_state_for_case
 from policy_engine import evaluate_case_policy
@@ -41,7 +41,7 @@ def audit_case(case_row: Dict[str, Any], uids_df, audit_df) -> Dict[str, Any]:
     identity_info = resolve_identity(email, uids_df, audit_df)
 
     # Stage 3: Request Classification
-    req_class = classify_request(req_text, case_id=case_id)
+    req_class, scope = classify_request_with_scope(req_text, case_id=case_id)
     if req_class == "NOT_A_DELETION_REQUEST":
         return {
             "case_id": case_id,
@@ -57,6 +57,8 @@ def audit_case(case_row: Dict[str, Any], uids_df, audit_df) -> Dict[str, Any]:
 
     # Stage 7: Policy Engine
     evaluated_resources = evaluate_case_policy(reconstructed_state)
+    if req_class == "PARTIAL_DELETION_REQUEST" and scope:
+        evaluated_resources = [r for r in evaluated_resources if r.get("data_category") == scope]
 
     # Stage 8: Status Decision
     deletion_status = decide_deletion_status(req_class, evaluated_resources)
@@ -89,7 +91,10 @@ def run_pipeline(input_path: str = DELETION_REQUESTS_PATH, output_path: str = OU
 
     out_df = pd.DataFrame(output_rows)
     # Ensure sorted by case_id
-    out_df = out_df.sort_values(by="case_id").reset_index(drop=True)
+    # The supplied IDs are case_33..case_550, not fixed-width strings.
+    # Sort by the numeric suffix required by the contract.
+    out_df = out_df.assign(_case_num=out_df["case_id"].astype(str).str.extract(r"(\d+)$", expand=False).astype(int))
+    out_df = out_df.sort_values(by=["_case_num", "case_id"]).drop(columns=["_case_num"]).reset_index(drop=True)
 
     # Stage 11: Schema validation
     print("Validating generated predictions against submission contract...")

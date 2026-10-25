@@ -9,7 +9,7 @@ This report describes **what the running code actually did**, not the original d
 - **LLM / VLM APIs used in the last local run:** none
 - **What ran instead:**
   1. Stage 3: keyword heuristic in `request_classifier.py` (`heuristic-classifier` / `classification-engine` log labels). The `OPENAI_API_KEY` / `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` branch is a no-op `pass`.
-  2. Stage 5: deterministic parsers for `.json`, `.sql`, `.log`, `.txt`, `.pdf`. **11 `.png` files are not parsed.** `vlm_client.py` is not used for those images.
+  2. Stage 5: deterministic parsers for `.json`, `.sql`, `.log`, `.txt`, `.pdf`, plus local OCR for the 11 image files. OCR is best-effort and emits an explicit fail-safe visual record when unavailable; no paid VLM call is claimed.
 
 Logged “token” numbers in `usage_log.jsonl` are **word counts / placeholders**, not provider billing tokens.
 
@@ -37,5 +37,5 @@ If an LLM is wired later, this file must be regenerated from real provider logs 
 
 ## 4. Notes
 1. Evidence mix in `evidence_files.csv`: 28 json, 26 log, 24 sql, 11 png, 4 pdf, 1 txt.
-2. Deterministic parsers cover the non-image files. Image coverage is an open gap (see DECISIONS.md [D-19]).
+2. Deterministic parsers cover structured files and local OCR covers images without inventing model-token usage.
 3. Stages 6–11 remain code-only (no model), which is still the right split for ordering and enums.

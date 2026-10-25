@@ -1,4 +1,5 @@
 import os
+import re
 import pandas as pd
 from typing import Dict, Any, List, Set
 from config import SYSTEM_ACTIVITY_PATH
@@ -6,6 +7,13 @@ from ingest import load_system_activity
 from evidence_extraction import extract_all_evidence_records
 
 _ACTIVITY_DF = None
+
+def _contains_identifier(text: str, identifier: str) -> bool:
+    """Match an identifier as a token, avoiding user_1/user_10 collisions."""
+    value = str(identifier).strip().lower()
+    if not value:
+        return False
+    return re.search(r"(?<![A-Za-z0-9@._+-])" + re.escape(value) + r"(?![A-Za-z0-9@._+-])", str(text).lower()) is not None
 
 def get_activity_df() -> pd.DataFrame:
     global _ACTIVITY_DF
@@ -22,7 +30,9 @@ def retrieve_evidence_for_case(case_row: Dict[str, Any], identity_info: Dict[str
     audit_at = str(case_row.get("audit_at", ""))
     requested_at = str(case_row.get("requested_at", ""))
     user_id = identity_info.get("user_id")
+    # Legal join keys only. Names are descriptive evidence, not safe cross-system keys.
     all_values_lower = set(v.lower() for v in identity_info.get("all_values", []) if len(v) >= 3)
+    all_values_lower -= {v.lower() for v in identity_info.get("all_identifiers", {}).get("names", [])}
     if "email" in case_row and case_row["email"]:
         all_values_lower.add(case_row["email"].lower().strip())
 
@@ -33,8 +43,7 @@ def retrieve_evidence_for_case(case_row: Dict[str, Any], identity_info: Dict[str
     for r in all_ev_records:
         cap_at = r.get("captured_at", "")
         if cap_at <= audit_at:
-            rec_id_lower = set(v.lower() for v in r.get("identifiers", []))
-            if rec_id_lower.intersection(all_values_lower):
+            if any(_contains_identifier(v, target) for v in r.get("identifiers", []) for target in all_values_lower):
                 matched_ev_records.append(r)
 
     # 2. Retrieve matching system activity records
@@ -50,9 +59,9 @@ def retrieve_evidence_for_case(case_row: Dict[str, Any], identity_info: Dict[str
         
         # Match if details mention user_id or any identifier
         matched = False
-        if user_id and user_id.lower() in det_lower:
+        if user_id and _contains_identifier(det_lower, user_id):
             matched = True
-        elif any(val in det_lower for val in all_values_lower):
+        elif any(_contains_identifier(det_lower, val) for val in all_values_lower):
             matched = True
             
         if matched:

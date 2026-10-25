@@ -275,3 +275,15 @@ This file is append-only in spirit: never delete or rewrite a past entry, even i
 
 - [x] DESIGN.md §6: exact handling of a required-RETAIN record that is missing — Resolved via [D-12]: in confirmed evidence, retained audit logs/legal holds are verified as PRESENT; missing retention has no matching operation in allowed enums and does not occur in evidence. STATUS: RESOLVED.
 
+### [D-20] Correctness hardening: identity joins, parsing, scope, and risk state
+- Phase: 2–10 / 2026-10-25
+- Decision: Use token-boundary joins without names, quote-aware SQL tuple parsing, numeric case ordering, condition-aware policy routing, structured sync/restore activity detection, and deterministic full/partial/non-deletion classification. Partial requests are filtered to the requested data category.
+- Why: Prevents cross-user contamination, silent SQL corruption, false compliance from missed active flows, and auditing records outside the user’s requested scope.
+- Status: ACTIVE
+
+### [D-21] Make image evidence observable and fail-safe
+- Phase: 5 / 2026-10-25
+- Decision: Parse the 11 PNG manifest entries with local OCR when available; if OCR cannot run, retain an explicit visual-evidence record requiring review rather than silently dropping the artifact. No fake model tokens or paid API calls are reported.
+- Why: An unparsed image can otherwise turn a remaining record into a false COMPLETE result.
+- Status: ACTIVE
+
