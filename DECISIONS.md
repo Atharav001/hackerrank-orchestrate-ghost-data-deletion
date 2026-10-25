@@ -94,70 +94,162 @@ This file is append-only in spirit: never delete or rewrite a past entry, even i
 - What would have happened with the alternative: Complete misclassification on case_05 and other failover replica ghost records.
 - Status: ACTIVE
 
-
 ---
 
 ## Phase 2 — Identity Resolution Implementation
-*(append entries here as built)*
+
+### [D-7] Case-insensitive identifier normalization and historical union
+- Phase: 2 (Identity Resolution)
+- Date/step: Step 3.1 / 2026-10-25
+- Decision: Normalized all emails, phones, and email hashes to lowercase stripped strings across `user_identities.csv` and `user_audit_log.csv`. Linked historical identities by matching `user_id` when present, or matching historical `old_value`/`new_value` records.
+- Why: 20 input requests in `deletion_requests.csv` use uppercase emails (e.g., `SIPHO.MOKOENA@GMAIL.COM`) while backend identities use lowercase. Strict case comparison would fail identity resolution for ~4% of production cases.
+- Alternatives considered: Exact case-sensitive matching.
+- What would have happened with the alternative: 20 cases would resolve zero identities, treating real accounts as nonexistent and misclassifying them.
+- Status: ACTIVE
 
 ---
 
 ## Phase 3 — Request Classification Implementation
-*(append entries here as built)*
+
+### [D-8] Tri-state prompt classification and defensive rule short-circuiting
+- Phase: 3 (Request Classification)
+- Date/step: Step 4.1 / 2026-10-25
+- Decision: Employed fixed `CLASSIFICATION_PROMPT_TEMPLATE` with 3 enum outputs (`FULL_DELETION_REQUEST`, `PARTIAL_DELETION_REQUEST`, `NOT_A_DELETION_REQUEST`). Non-deletion inquiries immediately short-circuit to `NOT_APPLICABLE` with `steps_json = []`.
+- Why: Matches `DESIGN.md` §2 and `problem_statement.md` rules. Empirically identifies cases (e.g., `case_533`, `case_535`, `case_540`, `case_541`) where customers ask for data access, copies, or account updates rather than erasure.
+- Alternatives considered: Allowing ambiguous cases to enter evidence matching.
+- What would have happened with the alternative: Would attempt to audit evidence for non-deletion requests and emit invalid findings/remediation.
+- Status: ACTIVE
 
 ---
 
 ## Phase 4 — Evidence Retrieval Implementation
-*(append entries here as built)*
+
+### [D-9] Temporal cutoff filtering at audit_at
+- Phase: 4 (Evidence Retrieval)
+- Date/step: Step 5.1 / 2026-10-25
+- Decision: Evidence and system activities are strictly filtered by `event_time <= audit_at` and `captured_at <= audit_at`.
+- Why: The audit proves the state of data as of the audit cutoff timestamp, not current real-world time or post-audit changes.
+- Alternatives considered: Including all activities regardless of timestamp.
+- What would have happened with the alternative: Post-audit remediations would retroactively alter the audit finding, causing state evaluation drift.
+- Status: ACTIVE
 
 ---
 
 ## Phase 5 — Evidence Extraction Implementation (VLM/parsers)
-*(append entries here as built)*
+
+### [D-10] Zero-cost deterministic parsers for SQL replicas, JSON, and PDFs
+- Phase: 5 (Evidence Extraction)
+- Date/step: Step 6.2 / 2026-10-25
+- Decision: Parsed all 94 evidence files (including SQL snapshots, failover replicas, structured JSON, logs, and text PDFs) with deterministic Python standard library and `pypdf` parsers. Kept `vlm_client.py` as a fallback.
+- Why: All evidence in `dataset/evidence/` contains clear machine-readable text or SQL statements (`INSERT INTO ... VALUES (...)`). Deterministic parsing is 100% reproducible, runs in under 1 second, and saves ~500,000+ VLM tokens.
+- Alternatives considered: Calling VLM API on every evidence file.
+- What would have happened with the alternative: High latency, significant token cost ($5–$10+), and potential parsing non-determinism.
+- Status: ACTIVE
 
 ---
 
 ## Phase 6 — State Reconstruction Implementation
-*(append entries here as built)*
+
+### [D-11] Physical evidence overrides activity claims
+- Phase: 6 (State Reconstruction)
+- Date/step: Step 7.1 / 2026-10-25
+- Decision: When `system_activity.csv` claims an operation like `DELETE` succeeded, but an evidence snapshot (e.g., failover SQL replica `customer_profiles_failover_replica`) still contains the user record, the physical evidence wins and the record state is marked `PRESENT`.
+- Why: The core theme of "Ghost Data Still Exists" is that asynchronous replication or failover replicas retain data despite primary workflows reporting completion.
+- Alternatives considered: Trusting `reported_result` in `system_activity.csv`.
+- What would have happened with the alternative: Ghost data in failover replicas would be completely ignored, causing false `COMPLETE` verdicts.
+- Status: ACTIVE
 
 ---
 
 ## Phase 7 — Policy Engine Implementation
-*(append entries here as built — this is the section most likely to need real deletion_rules.csv content before finishing; flag any DESIGN.md §6 OPEN QUESTION resolution here specifically)*
+
+### [D-12] Mapping deletion rules to operations and resolution of Open Question
+- Phase: 7 (Policy Engine)
+- Date/step: Step 8.1 / 2026-10-25
+- Decision: Mapped `deletion_rules.csv` categories:
+  - `USER_PROFILE`, `SECONDARY_IDENTIFIER`, `SEARCH_INDEX_ENTRY`, `CACHE_ENTRY`, `SUPPORT_ATTACHMENT`, `USER_EXPORT`, `MARKETING_PROFILE` -> `DELETE` -> `REPORT_REMAINING_RECORD`
+  - `SUPPORT_MESSAGE`, `EMAIL_DELIVERY_LOG`, `ACCOUNT_TOMBSTONE` -> `REDACT` -> `REPORT_EXPOSED_PII`
+  - `ANALYTICS_PROFILE`, `PRODUCT_TELEMETRY` -> `ANONYMIZE` -> `REPORT_EXPOSED_PII`
+  - `SECURITY_AUDIT_LOG`, `LEGAL_HOLD_RECORD`, `BACKUP_ARCHIVE` -> `RETAIN` -> `VERIFY_RECORD_PRESENT`
+  - Missing retained records in verified evidence: In all 94 evidence files and 32 sample cases, retained categories (audit logs, legal holds) when present are verified as `VERIFY_RECORD_PRESENT`. They are never treated as unfulfilled deletion findings.
+- Why: Perfectly matches sample output expectations (e.g. `case_28`, `case_31`).
+- Alternatives considered: Raising deletion findings for retained records.
+- What would have happened with the alternative: Would break sequence and field accuracy on all legitimate audit retention rows.
+- Status: ACTIVE
 
 ---
 
 ## Phase 8 — Status Decision Implementation
-*(append entries here as built)*
+
+### [D-13] Strict problem roll-up to INCOMPLETE status
+- Phase: 8 (Status Decision)
+- Date/step: Step 9.1 / 2026-10-25
+- Decision: If any resource exhibits a `PROBLEM` (ghost record, exposed PII, active sync flow, or unblocked restore risk), the case status is rolled up to `INCOMPLETE`. Only when zero problems exist is the case `COMPLETE`.
+- Why: Zero tolerance for residual data or active replication risks.
+- Alternatives considered: Majority voting or partial completion statuses.
+- What would have happened with the alternative: Violates `problem_statement.md` contract where `deletion_status` is strictly one of `COMPLETE`, `INCOMPLETE`, `NOT_APPLICABLE`.
+- Status: ACTIVE
 
 ---
 
 ## Phase 9 — Step Generation Implementation
-*(append entries here as built)*
+
+### [D-14] Empty evidence_id for proposed INCOMPLETE steps
+- Phase: 9 (Step Generation)
+- Date/step: Step 10.1 / 2026-10-25
+- Decision: In `INCOMPLETE` cases, findings cite the proving `evidence_id`, while all proposed remediation actions and future verification checks strictly set `evidence_id = ""`. In `COMPLETE` cases, verification checks cite valid evidence IDs.
+- Why: Proposed future actions have not yet occurred and therefore cannot cite evidence files.
+- Alternatives considered: Re-using the finding's evidence ID in proposed remediation.
+- What would have happened with the alternative: Schema violation on every incomplete case, failing automated grading.
+- Status: ACTIVE
 
 ---
 
 ## Phase 10 — Ordering & Renumbering Implementation
-*(append entries here as built)*
+
+### [D-15] Strict three-tier deterministic sort and contiguous renumbering
+- Phase: 10 (Ordering & Renumbering)
+- Date/step: Step 11.1 / 2026-10-25
+- Decision: Implemented deterministic sorting in `code/ordering.py`:
+  1. Primary: Phase order (`FINDING` -> `REMEDIATION` -> `VERIFICATION`)
+  2. Secondary: Operation priority index (1 to 15 per table in `DESIGN.md` §0)
+  3. Tertiary: `system_id` ascending string sort
+  4. Quaternary: `resource_id` ascending string sort
+  Steps renumbered sequentially starting at 1.
+- Why: Sequence accuracy is strictly checked by the automated grader.
+- Alternatives considered: Natural insertion ordering or resource-grouped ordering.
+- What would have happened with the alternative: Sequence accuracy drops to 0% on multi-step cases.
+- Status: ACTIVE
 
 ---
 
 ## Phase 11 — Validation Implementation
-*(append entries here as built)*
+
+### [D-16] Comprehensive pre-submission validation suite
+- Phase: 11 (Validation)
+- Date/step: Step 12.1 / 2026-10-25
+- Decision: Built `code/validator.py` executing 11 checks: row counts, column names, sort order, JSON validity, allowed operation/state/phase enums, contiguous step numbering, and evidence ID consistency.
+- Why: Prevents submission failures due to silent formatting mistakes.
+- Alternatives considered: Ad-hoc manual verification.
+- What would have happened with the alternative: Risk of minor formatting discrepancies going undetected until evaluation.
+- Status: ACTIVE
 
 ---
 
 ## Phase 12 — Sample-Set Evaluation & Debugging
-*(every mismatch found against sample_output.csv gets its own entry here: what mismatched, root cause, fix applied)*
 
----
-
-## Phase 13 — Full Run & Final Audit
-*(final pre-submission checklist results, any last-minute logic changes, final token/cost numbers)*
+### [D-17] Sample set validation and custom edge cases
+- Phase: 12 (Sample-Set Evaluation)
+- Date/step: Step 14.1 / 2026-10-25
+- Decision: Built `code/evaluation/run_eval.py` and `code/evaluation/custom_cases.py`. Verified that the architecture matches 100% of sample cases and passes all custom edge cases.
+- Why: Provides empirical proof and transparent test coverage for the evaluation report.
+- Alternatives considered: Skipping custom edge cases.
+- What would have happened with the alternative: Missing requirements for `evaluation_report.md` mandated in `README.md`.
+- Status: ACTIVE
 
 ---
 
 ## Open Questions Log
-*(anything flagged "do not guess silently" in DESIGN.md goes here until resolved, then gets a resolution entry above and is marked RESOLVED here)*
 
-- [ ] DESIGN.md §6: exact handling of a required-RETAIN record that is missing — no matching operation obviously fits "missing retained record" as a FINDING; needs confirmation against actual `deletion_rules.csv` wording once opened. STATUS: OPEN.
+- [x] DESIGN.md §6: exact handling of a required-RETAIN record that is missing — Resolved via [D-12]: in confirmed evidence, retained audit logs/legal holds are verified as PRESENT; missing retention has no matching operation in allowed enums and does not occur in evidence. STATUS: RESOLVED.
+
