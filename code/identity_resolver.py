@@ -15,7 +15,7 @@ def get_dataframes():
         _AUDIT_DF = load_user_audit_log()
     return _UIDS_DF, _AUDIT_DF
 
-def resolve_identity(email: str, uids_df: pd.DataFrame = None, audit_df: pd.DataFrame = None) -> Dict[str, Any]:
+def resolve_identity(email: str, uids_df: pd.DataFrame = None, audit_df: pd.DataFrame = None, audit_at: str = None) -> Dict[str, Any]:
     """
     Stage 2 — Identity Resolution algorithm:
     1. Look up email in user_identities.csv (case-insensitive).
@@ -127,15 +127,33 @@ def resolve_identity(email: str, uids_df: pd.DataFrame = None, audit_df: pd.Data
             elif fn == 'email_hash':
                 all_hashes.add(val)
 
+    # Build a second identity set from history known by the case cutoff.
+    eligible_events = [ev for ev in historical_events if not audit_at or ev["event_time"] <= audit_at]
+    asof = {"user_ids": sorted({user_id} if user_id else set()), "emails": set(), "phones": set(), "email_hashes": set()}
+    if current_identity.get("updated_at") and (not audit_at or current_identity["updated_at"] <= audit_at):
+        for key, value in (("emails", current_identity.get("email")), ("phones", current_identity.get("phone")), ("email_hashes", current_identity.get("email_hash"))):
+            if value: asof[key].add(value)
+    asof["emails"].add(email_clean)
+    for ev in eligible_events:
+        key = {"email": "emails", "phone": "phones", "email_hash": "email_hashes"}.get(ev["field_name"])
+        if key:
+            for value in (ev["old_value"], ev["new_value"]):
+                if value: asof[key].add(value)
+    asof = {key: sorted(value) for key, value in asof.items()}
+
     # All non-empty literal values that identify this user
     all_values: Set[str] = set()
     for s in [all_user_ids, all_emails, all_phones, all_hashes, all_names]:
         all_values.update(s)
 
+    audit_cutoff = None
+    # Caller may attach an audit cutoff; otherwise preserve all identifiers for
+    # existing callers and the per-case pipeline supplies a cutoff below.
     return {
         'user_id': user_id,
         'current': current_identity,
         'historical': historical_events,
+        'identifiers_as_of_audit': asof,
         'all_identifiers': {
             'user_ids': sorted(list(all_user_ids)),
             'emails': sorted(list(all_emails)),

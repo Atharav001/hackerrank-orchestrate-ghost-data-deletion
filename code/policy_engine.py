@@ -1,6 +1,7 @@
 import os
+import re
 import pandas as pd
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from ingest import load_deletion_rules
 
 _RULES_CACHE = None
@@ -14,6 +15,48 @@ def get_rules_map() -> Dict[str, str]:
         _CONDITIONS_CACHE = {row["data_category"]: str(row["condition"]) for _, row in df.iterrows()}
     return _RULES_CACHE
 
+def _condition_result(category: str, condition: str, resource: Dict[str, Any]) -> Tuple[bool, str]:
+    """Evaluate each condition from parsed fields and observed state, not category alone."""
+    if condition.strip().lower() == "always":
+        return True, "always applies"
+    facts = resource.get("policy_facts") or {}
+    facts = {str(k).lower(): v for k, v in facts.items()}
+    details = str(resource.get("details", "")).lower()
+    state = str(resource.get("state", "PRESENT"))
+    if category == "SUPPORT_MESSAGE":
+        shared = facts.get("shared_context", facts.get("contains_shared_context"))
+        if shared is not None:
+            return str(shared).lower() in {"1", "true", "yes"}, "shared context flag"
+        return any(term in details for term in ("shared", "agent", "order", "conversation")) or state == "PRESENT", "shared-context evidence or exposed identifiers"
+    if category == "SUPPORT_ATTACHMENT":
+        subject_only = facts.get("subject_only", facts.get("belongs_only_to_subject"))
+        if subject_only is not None:
+            return str(subject_only).lower() in {"1", "true", "yes"}, "attachment ownership flag"
+        return True, "subject-specific attachment defaults to deletion when ownership is not contradicted"
+    if category in {"ANALYTICS_PROFILE", "PRODUCT_TELEMETRY"}:
+        return state == "PRESENT" or bool(resource.get("direct_identifiers")), "record remains attributable" if state == "PRESENT" else "record has no direct identifiers"
+    if category == "EMAIL_DELIVERY_LOG":
+        has_email = any("@" in str(v) for v in facts.values()) or "@" in details or state == "PRESENT"
+        return has_email, "email identifier present" if has_email else "no email identifier present"
+    if category == "SECURITY_AUDIT_LOG":
+        until = str(facts.get("retention_until", ""))
+        cutoff = str(resource.get("audit_at", ""))
+        applies = not until or not cutoff or until >= cutoff
+        return applies, "within retention window" if applies else "retention window expired"
+    if category == "LEGAL_HOLD_RECORD":
+        active = facts.get("legal_hold_active", facts.get("hold_active"))
+        if active is not None:
+            applies = str(active).lower() in {"1", "true", "yes", "active"}
+        else:
+            applies = bool(re.search(r"legal.?hold.{0,30}(active|open|true)|hold_status.{0,10}active", details))
+        return applies, "active legal hold" if applies else "no active legal hold established"
+    if category == "BACKUP_ARCHIVE":
+        blocked = state == "BLOCKED"
+        return True, "backup must be retained with restore access blocked" if blocked else "backup can be retained only after restore is blocked"
+    if category == "ACCOUNT_TOMBSTONE":
+        return True, "stable subject reference retained; direct identifiers evaluated by state"
+    return True, "condition not specially constrained"
+
 def evaluate_resource_policy(resource: Dict[str, Any]) -> Dict[str, Any]:
     """
     Stage 7 — Policy Engine:
@@ -26,6 +69,15 @@ def evaluate_resource_policy(resource: Dict[str, Any]) -> Dict[str, Any]:
     sys_id = resource.get("system_id", "")
     res_id = resource.get("resource_id", "")
     req_action = rules_map.get(data_cat, "DELETE")
+    condition = (_CONDITIONS_CACHE or {}).get(data_cat, "Always")
+    applies, condition_reason = _condition_result(data_cat, condition, resource)
+    if not applies:
+        if data_cat in {"SECURITY_AUDIT_LOG", "LEGAL_HOLD_RECORD", "SUPPORT_ATTACHMENT"}:
+            req_action = "DELETE"
+        elif data_cat in {"ANALYTICS_PROFILE", "PRODUCT_TELEMETRY"}:
+            req_action = "ANONYMIZE"
+        elif data_cat == "EMAIL_DELIVERY_LOG":
+            req_action = "REDACT"
 
     classification = "OK"
     finding_op = None
@@ -67,9 +119,14 @@ def evaluate_resource_policy(resource: Dict[str, Any]) -> Dict[str, Any]:
 
     # Handle SECURITY_AUDIT_LOG / LEGAL_HOLD_RECORD
     elif req_action == "RETAIN":
-        classification = "CORRECTLY_RETAINED"
-        verification_op = "VERIFY_RECORD_PRESENT"
-        verification_state = "PRESENT"
+        if state == "PRESENT":
+            classification = "CORRECTLY_RETAINED"
+            verification_op = "VERIFY_RECORD_PRESENT"
+            verification_state = "PRESENT"
+        else:
+            # Absence of a required retained record is not a deletion violation and
+            # the contract has no operation for reporting a missing required record.
+            classification = "OK"
 
     # Handle DELETE requirement (USER_PROFILE, SEARCH_INDEX_ENTRY, USER_EXPORT, etc.)
     elif req_action == "DELETE":
@@ -128,7 +185,10 @@ def evaluate_resource_policy(resource: Dict[str, Any]) -> Dict[str, Any]:
         "remediation_state": remediation_state,
         "verification_op": verification_op,
         "verification_state": verification_state,
-        "evidence_id": resource.get("evidence_id", "")
+        "evidence_id": resource.get("evidence_id", ""),
+        "policy_condition": condition,
+        "condition_applies": applies,
+        "condition_reason": condition_reason,
     }
 
 def evaluate_case_policy(reconstructed_data: Dict[str, Any]) -> List[Dict[str, Any]]:

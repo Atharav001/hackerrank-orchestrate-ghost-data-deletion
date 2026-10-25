@@ -41,3 +41,7 @@ python3 code/evaluation/run_eval.py
 ```bash
 python3 code/validator.py
 ```
+
+### Sample evaluation and known evidence behavior
+
+Run `python3 code/evaluation/run_eval.py` for the public 32-case comparison. The evaluation report records the measured metrics from the latest run. On systems without a working OCR backend, image files remain represented in the evidence inventory with an `IMAGE_CONTENT_UNVERIFIED` marker; install a functioning local OCR engine and configure its executable to inspect image text. The run never counts heuristic word estimates as provider tokens.

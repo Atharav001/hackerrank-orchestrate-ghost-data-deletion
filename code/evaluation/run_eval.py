@@ -21,7 +21,7 @@ def evaluate_predictions(pred_df: pd.DataFrame, ground_truth_df: pd.DataFrame) -
     3. Sequence accuracy
     """
     # Merge on case_id
-    merged = pd.merge(ground_truth_df, pred_df, on="case_id", suffixes=("_true", "_pred"))
+    merged = pd.merge(ground_truth_df, pred_df, on="case_id", suffixes=("_true", "_pred"), validate="one_to_one")
     total_cases = len(merged)
 
     status_matches = 0
@@ -64,13 +64,16 @@ def evaluate_predictions(pred_df: pd.DataFrame, ground_truth_df: pd.DataFrame) -
                 sequence_ok = True
                 sequence_matches += 1
         else:
-            # Step counts differ
-            for sp in steps_pred:
-                # count field comparisons against closest or record mismatch
-                pass
-            for st in steps_true:
+            # Compare aligned positions; missing and extra positions count as
+            # seven incorrect fields each, making the denominator symmetric.
+            max_len = max(len(steps_true), len(steps_pred))
+            for idx in range(max_len):
+                st = steps_true[idx] if idx < len(steps_true) else {}
+                sp = steps_pred[idx] if idx < len(steps_pred) else {}
                 for k in ["step_no", "phase", "system_id", "resource_id", "operation", "state", "evidence_id"]:
                     total_field_comparisons += 1
+                    if idx < len(steps_true) and idx < len(steps_pred) and st.get(k) == sp.get(k):
+                        total_field_matches += 1
 
         if not (status_ok and sequence_ok):
             mismatches.append({

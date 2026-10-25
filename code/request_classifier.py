@@ -1,8 +1,5 @@
-import os
-import json
 import re
 from typing import Dict, Any, Tuple
-from config import USAGE_LOG_PATH
 
 CLASSIFICATION_PROMPT_TEMPLATE = """You are a privacy compliance intake agent auditing data deletion requests.
 Classify the following customer request into EXACTLY ONE of these three categories:
@@ -16,43 +13,44 @@ Customer Request:
 Return ONLY one of the exact labels: FULL_DELETION_REQUEST, PARTIAL_DELETION_REQUEST, or NOT_A_DELETION_REQUEST.
 """
 
-def _log_usage(case_id: str, model: str, input_tokens: int, output_tokens: int):
-    os.makedirs(os.path.dirname(USAGE_LOG_PATH), exist_ok=True)
-    entry = {
-        "stage": "request_classification",
-        "case_id": case_id,
-        "model": model,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens
-    }
-    with open(USAGE_LOG_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
-
 def classify_request_with_scope(request_text: str, case_id: str = "") -> Tuple[str, str]:
     """
     Stage 3 — Request Classification:
     Determines if request is FULL_DELETION_REQUEST, PARTIAL_DELETION_REQUEST, or NOT_A_DELETION_REQUEST.
     """
-    text_lower = request_text.lower().strip()
-    deletion = re.search(r"(delet\w*|eras\w*|remov\w*|forget\w*|clos\w*|supprim\w*|elimin\w*|lösch\w*|削除)", text_lower)
-    negated = re.search(r"\b(?:do not|don't|never)\s+(?:delete|remove|erase)|\b(?:keep|leave|retain)\b.{0,30}\b(?:delete|remove|erase)\b", text_lower)
-    non_deletion = re.search(r"\b(export|download|access|copy|correct|update|change|replace|invoice|marketing|unsubscribe|opt.?out|portable)\b", text_lower)
-    if (not deletion) or negated or (non_deletion and not re.search(r"\b(delete|erase|remove|forget|close)\b", text_lower)):
+    text_lower = re.sub(r"\s+", " ", str(request_text or "").lower()).strip()
+    deletion_pattern = r"(?:delet\w*|eras\w*|remov\w*|forget\w*|clos\w*|supprim\w*|suppression|effac\w*|elimin\w*|lösch\w*|削除|消去)"
+    deletion = re.search(deletion_pattern, text_lower)
+    explicit_non_deletion = re.search(
+        r"\b(?:export|download|access|copy|correct|update|change|replace|invoice|unsubscribe|opt.?out|portable|password reset)\b",
+        text_lower,
+    )
+    negated_deletion = re.search(
+        r"\b(?:do not|don't|never|please do not)\s+(?:delete|remove|erase|close)|"
+        r"\b(?:keep|leave|retain)\b.{0,45}\b(?:account|profile|data)\b",
+        text_lower,
+    )
+    verify_deleted_state = re.search(r"\b(?:verify|check|confirm|inspect|review|audit)\b", text_lower) and re.search(
+        r"\b(?:deleted|deletion|erased|removed|gone|already deleted)\b", text_lower
+    )
+    if (negated_deletion and not re.search(r"\b(?:but|however|except)\b.{0,60}" + deletion_pattern, text_lower)) or (explicit_non_deletion and not deletion and not verify_deleted_state):
         result = ("NOT_A_DELETION_REQUEST", "")
-    else:
+    elif deletion or verify_deleted_state:
         partial_terms = {
-            "USER_PROFILE": r"profile|account details|contact details|name|phone|email",
-            "SUPPORT_MESSAGE": r"support|conversation|ticket|message",
-            "SUPPORT_ATTACHMENT": r"attachment|document",
-            "ANALYTICS_PROFILE": r"analytics|analytics profile",
             "MARKETING_PROFILE": r"marketing|advertising",
-            "USER_EXPORT": r"export|downloaded file",
+            "ANALYTICS_PROFILE": r"analytics|telemetry",
             "SEARCH_INDEX_ENTRY": r"search index|search result",
+            "SUPPORT_ATTACHMENT": r"attachment|uploaded document",
+            "SUPPORT_MESSAGE": r"support|conversation|ticket|message",
+            "USER_EXPORT": r"export|downloaded file",
             "EMAIL_DELIVERY_LOG": r"email log|delivery log",
+            "USER_PROFILE": r"profile|account details|contact details|name|phone|email",
         }
         scope = next((cat for cat, pat in partial_terms.items() if re.search(pat, text_lower)), "")
-        result = ("PARTIAL_DELETION_REQUEST", scope) if scope and not re.search(r"\b(all|everything|entire|full|account and all)\b", text_lower) else ("FULL_DELETION_REQUEST", "")
-    _log_usage(case_id, "deterministic-classifier", len(request_text.split()), 1)
+        all_scope = re.search(r"\b(all|everything|entire|full|account and all|all personal data)\b", text_lower)
+        result = ("PARTIAL_DELETION_REQUEST", scope) if scope and not all_scope else ("FULL_DELETION_REQUEST", "")
+    else:
+        result = ("NOT_A_DELETION_REQUEST", "")
     return result
 
 def classify_request(request_text: str, case_id: str = "") -> str:

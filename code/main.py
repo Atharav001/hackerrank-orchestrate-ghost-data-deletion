@@ -39,7 +39,7 @@ def audit_case(case_row: Dict[str, Any], uids_df, audit_df) -> Dict[str, Any]:
     req_text = str(case_row.get("request_text", ""))
 
     # Stage 2: Identity Resolution
-    identity_info = resolve_identity(email, uids_df, audit_df)
+    identity_info = resolve_identity(email, uids_df, audit_df, str(case_row.get("audit_at", "")))
 
     # Stage 3: Request Classification
     req_class, scope = classify_request_with_scope(req_text, case_id=case_id)
@@ -78,7 +78,7 @@ def run_pipeline(input_path: str = DELETION_REQUESTS_PATH, output_path: str = OU
     Full pipeline orchestrating Stages 1 through 11.
     """
     print(f"Loading input requests from {input_path}...")
-    requests_df = pd.read_csv(input_path)
+    requests_df = load_deletion_requests(input_path)
     uids_df = load_user_identities()
     audit_df = load_user_audit_log()
 
@@ -99,11 +99,23 @@ def run_pipeline(input_path: str = DELETION_REQUESTS_PATH, output_path: str = OU
 
     # Stage 11: Schema validation
     print("Validating generated predictions against submission contract...")
-    errors = validate_dataframe(out_df, expected_row_count=len(requests_df))
+    manifest = load_evidence_manifest()
+    activity = load_system_activity()
+    audit_log = load_user_audit_log()
+    allowed_evidence = set(manifest["file_id"].astype(str))
+    allowed_evidence.update(activity["activity_id"].astype(str))
+    allowed_evidence.update(audit_log["audit_id"].astype(str))
+    errors = validate_dataframe(
+        out_df,
+        expected_row_count=len(requests_df),
+        expected_case_ids=requests_df["case_id"].astype(str).tolist(),
+        valid_evidence_ids=allowed_evidence,
+    )
     if errors:
         print(f"Validation warnings/errors ({len(errors)}):")
         for err in errors[:10]:
             print("  ", err)
+        raise ValueError(f"Refusing to write invalid output.csv; {len(errors)} validation error(s)")
     else:
         print("Schema validation passed with 0 errors!")
 

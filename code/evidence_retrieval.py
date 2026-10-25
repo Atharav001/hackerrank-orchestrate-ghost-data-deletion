@@ -30,9 +30,11 @@ def retrieve_evidence_for_case(case_row: Dict[str, Any], identity_info: Dict[str
     audit_at = str(case_row.get("audit_at", ""))
     requested_at = str(case_row.get("requested_at", ""))
     user_id = identity_info.get("user_id")
-    # Legal join keys only. Names are descriptive evidence, not safe cross-system keys.
-    all_values_lower = set(v.lower() for v in identity_info.get("all_values", []) if len(v) >= 3)
-    all_values_lower -= {v.lower() for v in identity_info.get("all_identifiers", {}).get("names", [])}
+    # Only identifiers known by the request's audit cutoff may be used. This prevents
+    # a later identity change from retroactively expanding the search set.
+    typed_ids = identity_info.get("identifiers_as_of_audit", identity_info.get("all_identifiers", {}))
+    legal_ids = typed_ids.get("user_ids", []) + typed_ids.get("emails", []) + typed_ids.get("phones", []) + typed_ids.get("email_hashes", [])
+    all_values_lower = {str(v).lower().strip() for v in legal_ids if len(str(v).strip()) >= 3}
     if "email" in case_row and case_row["email"]:
         all_values_lower.add(case_row["email"].lower().strip())
 
@@ -42,7 +44,8 @@ def retrieve_evidence_for_case(case_row: Dict[str, Any], identity_info: Dict[str
     
     for r in all_ev_records:
         cap_at = r.get("captured_at", "")
-        if cap_at <= audit_at:
+        observed_at = str(r.get("observed_at") or cap_at)
+        if cap_at <= audit_at and observed_at <= audit_at:
             if any(_contains_identifier(v, target) for v in r.get("identifiers", []) for target in all_values_lower):
                 matched_ev_records.append(r)
 
@@ -52,13 +55,16 @@ def retrieve_evidence_for_case(case_row: Dict[str, Any], identity_info: Dict[str
     sub_act = act_df[act_df["event_time"] <= audit_at]
     
     matched_act_records = []
+    # Resource IDs from subject-matched artifacts provide a grounded join into
+    # the global activity stream even when the activity's prose omits the user.
+    evidence_resource_ids = {str(r.get("resource_id", "")).lower() for r in matched_ev_records}
     # Fast match against details, resource_id, and timing
     for _, a_row in sub_act.iterrows():
         det_lower = str(a_row["details"]).lower()
         res_id = str(a_row["resource_id"])
         
         # Match if details mention user_id or any identifier
-        matched = False
+        matched = res_id.lower() in evidence_resource_ids
         if user_id and _contains_identifier(det_lower, user_id):
             matched = True
         elif any(_contains_identifier(det_lower, val) for val in all_values_lower):

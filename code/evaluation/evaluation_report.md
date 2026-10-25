@@ -1,70 +1,45 @@
 # Evaluation Report: Ghost Data Deletion Audit Agent
 
-## 1. Executive Summary
-This report is based on a **live re-run** of `code/evaluation/run_eval.py` on 2026-10-25 against `dataset/sample_deletion_requests.csv` and `dataset/sample_output.csv`. Earlier draft text that claimed 100% sample accuracy is withdrawn. The pipeline now compiles, extracts all manifest formats including image OCR, and produces a contract-valid 518-row full run; sample semantic matching still needs further tuning.
+## Measured public sample results
 
----
+Command: `python3 code/evaluation/run_eval.py`, run 2026-10-25 against the 32 public requests and `dataset/sample_output.csv`.
 
-## 2. Accuracy Metrics (Sample Dataset)
-The sample evaluation dataset consists of 32 requests.
+| Metric | Measured result |
+|---|---:|
+| Status accuracy | 78.12% (25/32) |
+| Exact ordered sequence accuracy | 12.50% (4/32) |
+| Field accuracy | 30.02% |
+| Cases with a status or sequence mismatch | 28/32 |
 
-| Metric | Target Requirement | Measured Result (live run) |
-| :--- | :--- | :--- |
-| **Case-level Status Accuracy** | 100% | **59.38% (19/32 cases)** |
-| **Sequence Accuracy** | >95% | **12.50% (4/32 cases)** |
-| **Field-level Accuracy** | >98% | **15.54%** |
+Field accuracy compares the seven required fields at each corresponding step position. Missing or extra positions each count as seven incorrect fields. Exact sequence accuracy requires equal sequence length and all fields to match in order. The seven status mismatches were case_03, case_07, case_09, case_10, case_16, case_20, and case_22.
 
-### Metric Definitions:
-1. **Case-level Status Accuracy:** Percentage of requests correctly assigned to `COMPLETE`, `INCOMPLETE`, or `NOT_APPLICABLE`.
-2. **Step / Field-level Accuracy:** Percentage of step objects where `step_no`, `phase`, `system_id`, `resource_id`, `operation`, `state`, and `evidence_id` match ground truth exactly.
-3. **Sequence Accuracy:** Percentage of cases where the ordered list of step objects strictly matches the ground truth sequence with zero positional drift.
+These figures are substantially below a reliable submission quality bar. The public sample score has not been improved substantially; this report states the measured result without tuning to case IDs or expected labels.
 
-### Status mismatches (7 cases)
-| Case | True status | Predicted status |
-| :--- | :--- | :--- |
-| case_03 | COMPLETE | INCOMPLETE |
-| case_10 | INCOMPLETE | COMPLETE |
-| case_12 | INCOMPLETE | COMPLETE |
-| case_15 | INCOMPLETE | COMPLETE |
-| case_16 | INCOMPLETE | COMPLETE |
-| case_20 | INCOMPLETE | COMPLETE |
-| case_22 | INCOMPLETE | COMPLETE |
+## Improvements implemented
 
-Most remaining sample cases have the **correct status but wrong or incomplete steps**. Common patterns:
+- Execute SQLite-compatible evidence snapshots through SQLite and derive category, state, identifiers, and record timestamps from rows.
+- Resolve current and historical identifiers, with historical identity changes bounded by each request's `audit_at`.
+- Match typed identifiers at token boundaries and restrict evidence observations to the audit cutoff.
+- Treat affirmative sync and restore checks as recreation risks, independently from workflow success claims.
+- Apply policy conditions to extracted record facts; avoid reporting a missing required-retention record as if it were present.
+- Validate case IDs, row ordering, exact output schema, JSON arrays, step fields, enums, phase/state compatibility, and evidence citations.
+- Remove fake model/token usage logging.
+- Preserve images as explicitly unverified artifacts when no OCR backend successfully extracts their content.
 
-- COMPLETE cases emit **zero verification steps** when the proof is “record absent from a SQL replica” (for example case_01 / case_02 citing `evidence_54`).
-- INCOMPLETE cases often **omit** `VERIFY_RECORD_ABSENT` for the primary `account_service` row even when other findings are correct.
-- Extra `VERIFY_RECORD_PRESENT` steps appear for `legal_service` / `doc_evidence_27` that sample output does not include.
-- Several findings that sample output expects (search remaining, support PII, active data flows) are missing when evidence is image-based or not extracted.
+## Three participant-created synthetic checks
 
----
+`python3 code/evaluation/custom_cases.py` contains three synthetic checks, without real participant identities:
 
-## 3. Custom Evaluation Cases
-Three synthetic cases exist in `code/evaluation/custom_cases.py`. Live run of case 1 **fails**.
+1. An invoice-copy inquiry without deletion authorization classifies as `NOT_A_DELETION_REQUEST`.
+2. Identity changes after the audit cutoff do not enter the eligible identifier set; pre-cutoff changes do.
+3. A pre-cutoff active connector observation reconstructs a `DATA_FLOW` risk and maps to `REPORT_ACTIVE_DATA_FLOW`.
 
-### Case 1: `custom_edge_01` — Non-Deletion Request Handling
-- **Input Text:** `"Hi support, could you please send me a copy of my last three monthly invoices? I need them for tax filing purposes. Thanks!"`
-- **Expected Result:** `NOT_APPLICABLE`, `steps_json = []`
-- **Observed Result:** `NOT_APPLICABLE`, `[]`. **PASS**
+These checks validate isolated components; they do not establish complete end-to-end correctness.
 
-### Case 2: `custom_edge_02` — Case-Insensitive Historical Identity
-- **Scenario:** Uppercase/historical email with possible failover replica leftovers.
-- **Status:** Not fully trusted until sample sequence accuracy is fixed. Classifier currently treats most deletion-like text as `FULL_DELETION_REQUEST`.
+## Failures and remaining limitations
 
-### Case 3: `custom_edge_03` — Active Data Flow
-- **Scenario:** Sync/restore risk without relying only on a remaining profile row.
-- **Status:** Same — harness exists; do not treat as passing until re-run after logic fixes.
-
----
-
-## 4. Failures Found and Remaining Fixes
-These are the issues that must be fixed before packing `code.zip` and writing the 518-row `output.csv`:
-
-1. **Absence proof for COMPLETE cases.** If a user’s account is gone from a snapshot, still emit `VERIFY_RECORD_ABSENT` citing that snapshot (`file_id`).
-2. **INCOMPLETE verification of the primary account.** Sample output still wants `VERIFY_RECORD_ABSENT` on `account_service` even when the finding is on another system.
-3. **Image evidence.** 11 of 94 files are `.png`; they now pass through local OCR with an explicit fail-safe record when OCR is unavailable.
-4. **Request classification.** Keyword list is too narrow; LLM branch is unused. Non-deletion requests that are phrased differently become false audits.
-5. **Legal-hold / retained records.** Do not emit extra `VERIFY_RECORD_PRESENT` rows that sample output does not include.
-6. **Honest usage accounting.** No billed LLM/VLM calls occurred in this run.
-
-The full run is contract-valid, but sample sequence accuracy remains a quality risk and should be improved before submission.
+- Public sample sequence accuracy is 12.50%; field accuracy is 30.02%. Correct status does not imply correct evidence references or action sequences.
+- Some sample expected outputs appear difficult to reconcile with the corresponding participant-facing evidence. Predictions remain evidence-based; organizer-only truth and case-family shortcuts were not used.
+- OCR did not work in this execution environment: macOS Vision returns `nilError`, and Tesseract is unavailable. The 11 PNG files are represented with `IMAGE_CONTENT_UNVERIFIED`; image-only identifiers and statuses can be missed.
+- The classifier and artifact parsers use deterministic rules and can miss unusual multilingual phrasing or schema variants.
+- Structural validation checks format and citation membership; it cannot prove semantic validity or complete artifact coverage.

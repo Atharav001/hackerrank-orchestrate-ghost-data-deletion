@@ -12,6 +12,8 @@ from config import (
     ALLOWED_OPERATIONS,
     ALLOWED_STATES,
     OPERATION_TO_PRIORITY_INDEX,
+    OPERATION_TO_PHASE,
+    OPERATION_TO_STATE,
     PHASE_ORDER_INDEX
 )
 
@@ -24,6 +26,9 @@ def validate_step(step: Dict[str, Any], expected_step_no: int, deletion_status: 
         missing = required_keys - set(step.keys())
         errors.append(f"{case_id} step {step.get('step_no')}: Missing keys: {missing}")
         return errors
+    extra = set(step.keys()) - required_keys
+    if extra:
+        errors.append(f"{case_id} step {expected_step_no}: Unexpected keys: {extra}")
 
     # Check step_no
     if step["step_no"] != expected_step_no:
@@ -38,9 +43,14 @@ def validate_step(step: Dict[str, Any], expected_step_no: int, deletion_status: 
     op = step["operation"]
     if op not in ALLOWED_OPERATIONS:
         errors.append(f"{case_id} step {expected_step_no}: Invalid operation '{op}'")
+    else:
+        if phase != OPERATION_TO_PHASE[op]:
+            errors.append(f"{case_id} step {expected_step_no}: {op} must use phase {OPERATION_TO_PHASE[op]}")
 
     # Check state enum
     st = step["state"]
+    if op in OPERATION_TO_STATE and st != OPERATION_TO_STATE[op]:
+        errors.append(f"{case_id} step {expected_step_no}: {op} must use state {OPERATION_TO_STATE[op]}")
     if st not in ALLOWED_STATES:
         errors.append(f"{case_id} step {expected_step_no}: Invalid state '{st}'")
 
@@ -65,7 +75,18 @@ def validate_step(step: Dict[str, Any], expected_step_no: int, deletion_status: 
 
     return errors
 
-def validate_dataframe(df: pd.DataFrame, expected_row_count: int = None) -> List[str]:
+def _case_sort_key(value: Any):
+    value = str(value)
+    import re
+    match = re.match(r"^(.*?)(\d+)$", value)
+    return (match.group(1), int(match.group(2)), value) if match else (value, -1, value)
+
+def validate_dataframe(
+    df: pd.DataFrame,
+    expected_row_count: int = None,
+    expected_case_ids=None,
+    valid_evidence_ids=None,
+) -> List[str]:
     errors = []
     
     # Check columns
@@ -82,6 +103,13 @@ def validate_dataframe(df: pd.DataFrame, expected_row_count: int = None) -> List
     case_ids = list(df["case_id"])
     if len(case_ids) != len(set(case_ids)):
         errors.append("Duplicate case_ids found in output")
+    if case_ids != sorted(case_ids, key=_case_sort_key):
+        errors.append("case_id rows are not in natural ascending order")
+    if expected_case_ids is not None:
+        expected = list(map(str, expected_case_ids))
+        if set(case_ids) != set(expected):
+            errors.append(f"case_id set mismatch: missing={sorted(set(expected)-set(case_ids))[:10]}, extra={sorted(set(case_ids)-set(expected))[:10]}")
+    valid_evidence_ids = set(map(str, valid_evidence_ids)) if valid_evidence_ids is not None else None
 
     # Validate each row
     for idx, row in df.iterrows():
@@ -116,6 +144,9 @@ def validate_dataframe(df: pd.DataFrame, expected_row_count: int = None) -> List
         for step_idx, step in enumerate(steps, start=1):
             step_errs = validate_step(step, step_idx, status, cid)
             errors.extend(step_errs)
+            ev_id = str(step.get("evidence_id", ""))
+            if ev_id and valid_evidence_ids is not None and ev_id not in valid_evidence_ids:
+                errors.append(f"{cid} step {step_idx}: Unknown evidence_id '{ev_id}'")
 
             phase = step.get("phase")
             if phase in PHASE_ORDER_INDEX:
@@ -150,11 +181,11 @@ def validate_dataframe(df: pd.DataFrame, expected_row_count: int = None) -> List
 
     return errors
 
-def validate_file(file_path: str, expected_row_count: int = None) -> Tuple[bool, List[str]]:
+def validate_file(file_path: str, expected_row_count: int = None, expected_case_ids=None, valid_evidence_ids=None) -> Tuple[bool, List[str]]:
     if not os.path.exists(file_path):
         return False, [f"File does not exist: {file_path}"]
     df = pd.read_csv(file_path)
-    errors = validate_dataframe(df, expected_row_count)
+    errors = validate_dataframe(df, expected_row_count, expected_case_ids, valid_evidence_ids)
     return len(errors) == 0, errors
 
 def test_validator():

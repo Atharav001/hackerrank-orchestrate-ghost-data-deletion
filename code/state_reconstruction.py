@@ -16,61 +16,62 @@ def reconstruct_state_for_case(
     ev_records = retrieved_data.get("matched_evidence_records", [])
     act_records = retrieved_data.get("matched_activity_records", [])
 
-    # Group evidence records by (system_id, resource_id)
-    # Take the latest evidence snapshot before audit_at
+    # Group evidence by service and resource, choosing the newest record-level
+    # observation (not just the enclosing file capture time).
     resources = {}
+    state_rank = {"PRESENT": 6, "ACTIVE": 5, "ABSENT": 4, "REDACTED": 3, "ANONYMIZED": 2, "BLOCKED": 1, "DISABLED": 0}
 
     for er in ev_records:
+        observed_at = str(er.get("observed_at") or er.get("captured_at") or "")
+        if observed_at and observed_at > str(audit_at):
+            continue
         key = (er["system_id"], er["resource_id"])
         if key not in resources:
-            resources[key] = er
+            resources[key] = {**er, "_state_time": observed_at}
         else:
-            # Pick latest captured evidence
-            if er["captured_at"] > resources[key]["captured_at"]:
-                resources[key] = er
+            previous = resources[key]
+            old_time = str(previous.get("_state_time") or previous.get("captured_at") or "")
+            # Several parsers can emit multiple rows for one artifact/resource,
+            # including a search hit and an empty-query result. Prefer actual
+            # positive record observations when timestamps tie.
+            if (observed_at, state_rank.get(er.get("state"), -1), str(er.get("evidence_id", ""))) > (
+                old_time, state_rank.get(previous.get("state"), -1), str(previous.get("evidence_id", ""))
+            ):
+                resources[key] = {**er, "_state_time": observed_at}
 
     # Check for active data-flow / restore risks in activity logs if not already captured in evidence
-    for ar in act_records:
+    activity_latest = {}
+    for ar in sorted(act_records, key=lambda x: str(x.get("event_time", ""))):
         res_id = ar.get("resource_id")
-        evt_type = ar.get("event_type")
+        evt_type = str(ar.get("event_type") or "").upper()
         target_sys = ar.get("target_system")
-        res_result = ar.get("reported_result")
-
         details = str(ar.get("details", "")).lower()
-        result = str(res_result or "").lower()
-        flow_event = str(evt_type or "").upper() in {"CHECK_DATA_FLOW", "SYNC", "IMPORT", "DATA_FLOW"}
-        restore_event = str(evt_type or "").upper() in {"CHECK_RESTORE_ACCESS", "RESTORE", "BACKUP_RESTORE"}
-        flow_active = result in {"ACTIVE", "ENABLED", "RUNNING", "SUCCESS"} or any(x in details for x in ("remains enabled", "enabled=true", "active", "running"))
-        restore_active = result in {"ACTIVE", "ENABLED", "ALLOWED", "RUNNING", "SUCCESS"} or any(x in details for x in ("remains active", "restore_allowed=true", "allowed"))
-        # Treat structured flow/restore events as risks; free text is only a fallback.
-        if flow_event and flow_active:
+        category = "DATA_FLOW" if evt_type == "CHECK_DATA_FLOW" else "BACKUP_ARCHIVE" if evt_type == "CHECK_RESTORE_ACCESS" else None
+        proves_risk = (category == "DATA_FLOW" and any(x in details for x in ("remains enabled", "enabled=true"))) or (
+            category == "BACKUP_ARCHIVE" and any(x in details for x in ("can still be restored", "restore_allowed=true"))
+        )
+        if category and proves_risk:
             key = (target_sys, res_id)
-            if key not in resources or resources[key]["state"] != "DISABLED":
-                resources[key] = {
-                    "evidence_id": ar.get("activity_id"),
-                    "file_path": "system_activity.csv",
-                    "captured_at": ar.get("event_time"),
-                    "system_id": target_sys,
-                    "resource_id": res_id,
-                    "data_category": "DATA_FLOW",
-                    "state": "ACTIVE",
-                    "identifiers": set(),
-                    "details": ar.get("details")
-                }
-        elif restore_event and restore_active:
-            key = (target_sys, res_id)
-            if key not in resources or resources[key]["state"] != "BLOCKED":
-                resources[key] = {
-                    "evidence_id": ar.get("activity_id"),
-                    "file_path": "system_activity.csv",
-                    "captured_at": ar.get("event_time"),
-                    "system_id": target_sys,
-                    "resource_id": res_id,
-                    "data_category": "BACKUP_ARCHIVE",
-                    "state": "ACTIVE",
-                    "identifiers": set(),
-                    "details": ar.get("details")
-                }
+            previous = activity_latest.get(key)
+            if previous is None or str(ar.get("event_time", "")) > str(previous.get("event_time", "")):
+                activity_latest[key] = ar
+
+    # Activity checks establish a risk only when they postdate the last state
+    # evidence. Report the proving activity row as the finding citation.
+    for key, ar in activity_latest.items():
+        rec = resources.get(key)
+        activity_time = str(ar.get("event_time", ""))
+        evidence_time = str((rec or {}).get("_state_time", ""))
+        if not rec or activity_time >= evidence_time:
+            evt_type = str(ar.get("event_type", ""))
+            category = "DATA_FLOW" if evt_type == "CHECK_DATA_FLOW" else "BACKUP_ARCHIVE"
+            resources[key] = {
+                "evidence_id": ar.get("activity_id"), "file_path": "system_activity.csv",
+                "captured_at": activity_time, "observed_at": activity_time,
+                "system_id": key[0], "resource_id": key[1], "data_category": category,
+                "state": "ACTIVE", "identifiers": set(), "details": ar.get("details", ""),
+                "_state_time": activity_time,
+            }
 
     # Format resource states
     reconstructed_resources = []
@@ -82,7 +83,10 @@ def reconstruct_state_for_case(
             "state": rec.get("state", "PRESENT"),
             "evidence_id": rec.get("evidence_id", ""),
             "captured_at": rec.get("captured_at", ""),
-            "details": rec.get("details", "")
+            "details": rec.get("details", ""),
+            "policy_facts": rec.get("policy_facts", {}),
+            "direct_identifiers": bool(rec.get("identifiers")),
+            "audit_at": audit_at
         })
 
     return {

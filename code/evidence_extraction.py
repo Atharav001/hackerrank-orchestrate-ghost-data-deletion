@@ -2,6 +2,10 @@ import os
 import json
 import re
 import glob
+import sqlite3
+import shutil
+import subprocess
+import sys
 from typing import List, Dict, Any, Set
 import pandas as pd
 from config import DATASET_DIR, EVIDENCE_FILES_PATH
@@ -36,6 +40,169 @@ def _clean_str(val: Any) -> str:
     s = str(val).strip()
     return "" if s.lower() in ("none", "null", "nan") else s
 
+def _as_bool(value: Any) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "enabled", "active", "allowed"}
+
+def _sql_records(path: str, evidence_id: str, rel_path: str, captured_at: str) -> List[Dict[str, Any]]:
+    """Read SQLite-compatible evidence through SQLite so quoted/multiline values stay intact."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        with open(path, "r", encoding="utf-8", errors="strict") as src:
+            conn.executescript(src.read())
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+        normalized: List[Dict[str, Any]] = []
+        for table in tables:
+            quoted_table = '"' + table.replace('"', '""') + '"'
+            for raw in conn.execute(f"SELECT * FROM {quoted_table}"):
+                row = {str(k).lower(): v for k, v in dict(raw).items()}
+                payload = row.get("record_json")
+                if payload:
+                    try:
+                        embedded = json.loads(payload)
+                        if isinstance(embedded, dict):
+                            row = {**row, **{str(k).lower(): v for k, v in embedded.items()}}
+                    except (TypeError, json.JSONDecodeError):
+                        pass
+                collection = str(row.get("collection_name") or table).lower()
+                origin = str(row.get("origin_system") or "").lower()
+                name = collection + " " + table.lower() + " " + origin
+                mappings = [
+                    (("tombstone", "deleted_customer_reference"), ("identity_service", "ACCOUNT_TOMBSTONE")),
+                    (("customer_profile", "customer_account"), ("account_service", "USER_PROFILE")),
+                    (("search",), ("search_service", "SEARCH_INDEX_ENTRY")),
+                    (("analytics", "telemetry"), ("analytics_platform", "ANALYTICS_PROFILE")),
+                    (("support_attachment", "attachment"), ("support_platform", "SUPPORT_ATTACHMENT")),
+                    (("support", "conversation", "message"), ("support_platform", "SUPPORT_MESSAGE")),
+                    (("export",), ("export_service", "USER_EXPORT")),
+                    (("connector", "data_flow", "subscription"), ("integration_service", "DATA_FLOW")),
+                    (("backup", "restore", "archive"), ("backup_service", "BACKUP_ARCHIVE")),
+                    (("security", "audit", "retention"), ("security_service", "SECURITY_AUDIT_LOG")),
+                    (("marketing",), ("marketing_platform", "MARKETING_PROFILE")),
+                    (("cache",), ("cache_service", "CACHE_ENTRY")),
+                ]
+                system, category = next((pair for keys, pair in mappings if any(key in name for key in keys)), (origin or "unknown_service", "USER_PROFILE"))
+                resource_id = _clean_str(row.get("resource_id"))
+                if not resource_id:
+                    continue
+                id_keys = {
+                    "user_id", "subject_reference", "subject_ref", "customer_reference", "owner_id",
+                    "owner_user_id", "customer_id", "email", "owner_email", "customer_email",
+                    "requester_email", "phone", "owner_phone", "requester_phone", "email_hash",
+                }
+                identifiers = {str(row[k]).strip() for k in id_keys if k in row and _clean_str(row[k])}
+                has_direct = any(k in row and _clean_str(row[k]) for k in (
+                    "email", "owner_email", "customer_email", "requester_email", "phone",
+                    "owner_phone", "requester_phone", "email_hash", "full_name", "name",
+                ))
+                state = "PRESENT"
+                if category == "ANALYTICS_PROFILE":
+                    state = "PRESENT" if has_direct else "ANONYMIZED"
+                elif category in {"SUPPORT_MESSAGE", "SUPPORT_ATTACHMENT", "EMAIL_DELIVERY_LOG", "ACCOUNT_TOMBSTONE"}:
+                    state = "PRESENT" if has_direct else "REDACTED"
+                elif category == "DATA_FLOW":
+                    state = "ACTIVE" if _as_bool(row.get("enabled")) else "DISABLED"
+                elif category == "BACKUP_ARCHIVE":
+                    state = "ACTIVE" if _as_bool(row.get("restore_allowed")) else "BLOCKED"
+                elif category == "SEARCH_INDEX_ENTRY":
+                    state = "PRESENT"
+                elif category == "USER_EXPORT":
+                    state = "PRESENT" if _as_bool(row.get("download_available", True)) else "ABSENT"
+                observed_at = _clean_str(row.get("updated_at") or row.get("captured_at") or row.get("indexed_at") or captured_at)
+                normalized.append({
+                    "evidence_id": evidence_id, "file_path": rel_path, "captured_at": captured_at,
+                    "observed_at": observed_at, "system_id": system, "resource_id": resource_id,
+                    "data_category": category, "state": state, "identifiers": identifiers,
+                    "details": json.dumps(row, ensure_ascii=False, default=str),
+                    "policy_facts": row,
+                })
+        return normalized
+    finally:
+        conn.close()
+
+def _ocr_images(paths: List[str]) -> Dict[str, str]:
+    if not paths:
+        return {}
+    if sys.platform == "darwin" and shutil.which("swift"):
+        helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision_ocr.swift")
+        try:
+            proc = subprocess.run(["swift", "-module-cache-path", os.path.join("/private/tmp", "ghost_audit_swift_cache"), helper, *paths], capture_output=True, text=True, timeout=180, check=True)
+            data = json.loads(proc.stdout)
+            return {path: str(data.get(path, "")) for path in paths}
+        except (subprocess.SubprocessError, json.JSONDecodeError):
+            return {path: "" for path in paths}
+    try:
+        from PIL import Image
+        import pytesseract
+        if not shutil.which(pytesseract.pytesseract.tesseract_cmd):
+            raise RuntimeError("Tesseract binary is missing")
+        return {path: pytesseract.image_to_string(Image.open(path)) for path in paths}
+    except Exception as exc:
+        # Preserve the artifact for retrieval by filename and manifest capture time. OCR failure
+        # is surfaced in extracted details and must not make the full audit non-runnable.
+        return {path: "" for path in paths}
+
+def _log_records(path: str, evidence_id: str, rel_path: str, captured_at: str) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    trace_context: Dict[str, Dict[str, str]] = {}
+    attr_re = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(?:\"([^\"]*)\"|'([^']*)'|([^\s]+))")
+    for line in open(path, "r", encoding="utf-8", errors="replace"):
+        text = line.strip()
+        attrs = {m.group(1).lower(): next(v for v in m.groups()[1:] if v is not None) for m in attr_re.finditer(text)}
+        trace_id = attrs.get("trace_id", "")
+        if trace_id:
+            context = trace_context.setdefault(trace_id, {})
+            for key, value in attrs.items():
+                if key in {"lookup_key", "match_key", "subject_key", "subject_ref", "subject_reference", "correlation_key", "owner_key", "customer_reference", "user_id", "email", "phone", "email_hash", "customer_email", "matched_value"} and value:
+                    context[key] = value
+        else:
+            context = {}
+        # A query-start log may establish the identity context for a resource
+        # revealed on the next line of the same trace. Retain trace context until
+        # its resource result arrives.
+        if "resource_id" not in attrs:
+            continue
+        res_id = attrs["resource_id"]
+        raw_service = attrs.get("service", attrs.get("system", attrs.get("origin_system", "account_service"))).lower()
+        service = next((canonical for token, canonical in (("support", "support_platform"), ("search", "search_service"), ("analytics", "analytics_platform"), ("backup", "backup_service"), ("restore", "backup_service"), ("integration", "integration_service"), ("connector", "integration_service"), ("export", "export_service"), ("security", "security_service"), ("marketing", "marketing_platform"), ("account", "account_service")) if token in raw_service), raw_service)
+        event = attrs.get("event", attrs.get("event_type", "")).lower()
+        merged = {**context, **attrs}
+        id_keys = {"lookup_key", "match_key", "subject_key", "subject_ref", "subject_reference", "correlation_key", "owner_key", "customer_reference", "user_id", "email", "phone", "email_hash", "customer_email", "matched_value"}
+        identifiers = {v.strip() for k, v in merged.items() if k in id_keys and v.strip() and v.strip().lower() not in {"null", "none", "anonymous"}}
+        category, state = "USER_PROFILE", "PRESENT"
+        if "search" in service:
+            category = "SEARCH_INDEX_ENTRY"
+            state = "PRESENT" if attrs.get("result", "").lower() in {"hit", "found", "present"} else "ABSENT" if attrs.get("result", "").lower() in {"miss", "not_found", "absent"} else "PRESENT"
+        elif "support" in service or "attachment" in event:
+            category = "SUPPORT_ATTACHMENT" if "attachment" in event or "attachment" in attrs.get("file", "").lower() else "SUPPORT_MESSAGE"
+            state = "PRESENT" if attrs.get("matched_value") or attrs.get("rows") == "1" or "pii_scan" in event or attrs.get("marker_found", "").lower() == "false" else "REDACTED"
+        elif "analytic" in service:
+            category = "ANALYTICS_PROFILE"
+            state = "PRESENT" if identifiers else "ANONYMIZED"
+        elif "integration" in service or "connector" in event:
+            category = "DATA_FLOW"
+            state = "ACTIVE" if attrs.get("enabled", "").lower() in {"true", "1", "yes"} or "enabled=true" in text.lower() else "DISABLED"
+        elif "backup" in service or "restore" in event:
+            category = "BACKUP_ARCHIVE"
+            state = "BLOCKED" if attrs.get("restore_allowed", "").lower() in {"false", "0", "no"} or attrs.get("deletion_block", "").lower() in {"true", "1", "yes"} else "ACTIVE"
+        elif "export" in service:
+            category = "USER_EXPORT"
+            state = "PRESENT" if attrs.get("available", "").lower() in {"true", "1", "yes"} or "completed" in event else "PRESENT"
+        elif "security" in service:
+            category, state = "SECURITY_AUDIT_LOG", "PRESENT"
+        elif "marketing" in service:
+            category = "MARKETING_PROFILE"
+            state = "PRESENT" if identifiers else "ABSENT"
+        observed = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)", text)
+        records.append({
+            "evidence_id": evidence_id, "file_path": rel_path, "captured_at": captured_at,
+            "observed_at": observed.group(1) if observed else captured_at,
+            "system_id": service, "resource_id": res_id, "data_category": category,
+            "state": state, "identifiers": identifiers, "details": text,
+            "policy_facts": attrs,
+        })
+    return records
+
 def extract_all_evidence_records() -> List[Dict[str, Any]]:
     """
     Parses all 94 evidence files in dataset/evidence/ into normalized records:
@@ -57,6 +224,9 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
 
     manifest_df = pd.read_csv(EVIDENCE_FILES_PATH)
     all_records = []
+    image_rows = manifest_df[manifest_df["file_path"].astype(str).str.lower().str.endswith((".png", ".jpg", ".jpeg"))]
+    image_full_paths = [os.path.join(DATASET_DIR, str(p)) for p in image_rows["file_path"].tolist()]
+    image_texts = _ocr_images(image_full_paths)
 
     for _, row in manifest_df.iterrows():
         eid = str(row['file_id'])
@@ -83,14 +253,14 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
                                 if not res_id:
                                     continue
                                 id_set = set()
-                                for k in ["customer_reference", "subject_reference", "email", "owner_email", "customer_email", "phone", "owner_phone", "email_hash", "query"]:
+                                for k in ["user_id", "subject_reference", "subject_ref", "customer_reference", "email", "owner_email", "customer_email", "phone", "owner_phone", "email_hash", "query"]:
                                     val = _clean_str(it.get(k))
                                     if val:
                                         id_set.add(val)
                                 # Documents inside hits
                                 if "hits" in it and isinstance(it["hits"], dict):
                                     for doc in it["hits"].get("documents", []):
-                                        for k in ["email", "phone", "customer_reference", "display_name", "email_hash"]:
+                                        for k in ["user_id", "subject_reference", "email", "phone", "customer_reference", "display_name", "email_hash"]:
                                             val = _clean_str(doc.get(k))
                                             if val:
                                                 id_set.add(val)
@@ -130,12 +300,14 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
                                     "evidence_id": eid,
                                     "file_path": rel_path,
                                     "captured_at": captured_at,
+                                    "observed_at": _clean_str(it.get("updated_at") or it.get("last_checked_at") or it.get("checked_at") or it.get("indexed_at") or it.get("created_at") or captured_at),
                                     "system_id": svc,
                                     "resource_id": res_id,
                                     "data_category": cat,
                                     "state": state,
                                     "identifiers": id_set,
-                                    "details": str(it)
+                                    "details": str(it),
+                                    "policy_facts": it
                                 })
 
                 # Format B: customer_data_snapshot_bundle_*.json
@@ -147,7 +319,7 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
                             if not res_id:
                                 continue
                             id_set = set()
-                            for k in ["customer_reference", "subject_reference", "email", "phone", "email_hash", "name", "owner_email"]:
+                            for k in ["user_id", "subject_reference", "subject_ref", "customer_reference", "email", "phone", "email_hash", "name", "owner_email", "customer_email", "owner_phone", "requester_email", "requester_phone"]:
                                 val = _clean_str(r.get(k))
                                 if val:
                                     id_set.add(val)
@@ -200,12 +372,14 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
                                 "evidence_id": eid,
                                 "file_path": rel_path,
                                 "captured_at": captured_at,
+                                "observed_at": _clean_str(r.get("updated_at") or r.get("last_checked_at") or r.get("checked_at") or r.get("indexed_at") or captured_at),
                                 "system_id": svc,
                                 "resource_id": res_id,
                                 "data_category": cat,
                                 "state": state,
                                 "identifiers": id_set,
-                                "details": str(r)
+                                "details": str(r),
+                                "policy_facts": r
                             })
 
                 # Format C: generic collection with records list
@@ -216,7 +390,7 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
                         if not res_id:
                             continue
                         id_set = set()
-                        for k in ["customer_reference", "subject_reference", "email", "phone", "email_hash", "name", "owner_email", "customer_email"]:
+                        for k in ["user_id", "subject_reference", "subject_ref", "customer_reference", "email", "phone", "email_hash", "name", "owner_email", "customer_email", "owner_phone", "requester_email", "requester_phone"]:
                             val = _clean_str(r.get(k))
                             if val:
                                 id_set.add(val)
@@ -247,12 +421,14 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
                             "evidence_id": eid,
                             "file_path": rel_path,
                             "captured_at": captured_at,
+                            "observed_at": _clean_str(r.get("updated_at") or r.get("last_checked_at") or r.get("checked_at") or r.get("indexed_at") or captured_at),
                             "system_id": svc,
                             "resource_id": res_id,
                             "data_category": cat,
                             "state": state,
                             "identifiers": id_set,
-                            "details": str(r)
+                            "details": str(r),
+                            "policy_facts": r
                         })
 
             except Exception:
@@ -308,80 +484,14 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
         # 3. SQL database snapshots
         elif ext == ".sql":
             try:
-                with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-                    for line in f:
-                        line_s = line.strip()
-                        if line_s.startswith("INSERT INTO"):
-                            m = re.match(r"INSERT INTO [\"`]?([a-zA-Z0-9_]+)[\"`]? VALUES\s*\((.*)\);?", line_s)
-                            if m:
-                                table_name = m.group(1)
-                                vals_str = m.group(2)
-                                raw_vals = [v.strip() for v in _parse_sql_values(vals_str)]
-                                if not raw_vals:
-                                    continue
-                                res_id = raw_vals[0]
-                                id_set = set()
-                                for v in raw_vals[1:]:
-                                    cv = _clean_str(v)
-                                    if cv and len(cv) >= 3 and cv.upper() not in ("NULL", "NONE", "ACTIVE", "DELETED", "BLOCKED", "ENABLED", "DISABLED", "0", "1"):
-                                        id_set.add(cv.strip("'\""))
-
-                                svc = "account_service"
-                                cat = "USER_PROFILE"
-                                state = "PRESENT"
-
-                                if "customer_profiles" in table_name or "customer_accounts" in table_name or "customer_data" in table_name:
-                                    svc = "account_service"
-                                    cat = "USER_PROFILE"
-                                    state = "PRESENT"
-                                elif "search" in table_name:
-                                    svc = "search_service"
-                                    cat = "SEARCH_INDEX_ENTRY"
-                                    state = "PRESENT"
-                                elif "analytics" in table_name:
-                                    svc = "analytics_platform"
-                                    cat = "ANALYTICS_PROFILE"
-                                    state = "PRESENT"
-                                elif "support" in table_name:
-                                    svc = "support_platform"
-                                    cat = "SUPPORT_MESSAGE"
-                                    state = "PRESENT"
-                                elif "backup" in table_name:
-                                    svc = "backup_service"
-                                    cat = "BACKUP_ARCHIVE"
-                                    # restore allowed flag is usually in raw_vals
-                                    is_allowed = any(v in ("1", "'1'", "true", "TRUE") for v in raw_vals)
-                                    state = "ACTIVE" if is_allowed else "BLOCKED"
-                                elif "connector" in table_name or "data_flow" in table_name:
-                                    svc = "integration_service"
-                                    cat = "DATA_FLOW"
-                                    is_enabled = any(v in ("1", "'1'", "true", "TRUE") for v in raw_vals)
-                                    state = "ACTIVE" if is_enabled else "DISABLED"
-                                elif "export" in table_name:
-                                    svc = "export_service"
-                                    cat = "USER_EXPORT"
-                                    state = "PRESENT"
-                                elif "audit" in table_name or "security" in table_name:
-                                    svc = "security_service"
-                                    cat = "SECURITY_AUDIT_LOG"
-                                    state = "PRESENT"
-
-                                all_records.append({
-                                    "evidence_id": eid,
-                                    "file_path": rel_path,
-                                    "captured_at": captured_at,
-                                    "system_id": svc,
-                                    "resource_id": res_id,
-                                    "data_category": cat,
-                                    "state": state,
-                                    "identifiers": id_set,
-                                    "details": line_s
-                                })
-            except Exception:
-                pass
+                all_records.extend(_sql_records(full_path, eid, rel_path, captured_at))
+            except (OSError, sqlite3.Error, UnicodeError) as exc:
+                raise RuntimeError(f"Unable to parse SQL evidence {eid} ({rel_path}): {exc}") from exc
 
         # 4. Log files
         elif ext == ".log":
+            all_records.extend(_log_records(full_path, eid, rel_path, captured_at))
+            continue
             try:
                 with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
                     for line in f:
@@ -459,22 +569,52 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
             except Exception:
                 pass
 
-        # 5. PDFs and images. Images use local OCR when available; failures are
-        # represented as an explicit fail-safe record rather than disappearing.
+        # 5. Image evidence is OCRed up front so identifiers can connect it to a subject.
         elif ext in (".png", ".jpg", ".jpeg"):
-            try:
-                from PIL import Image
-                import pytesseract
-                visual_text = pytesseract.image_to_string(Image.open(full_path))
-            except Exception as exc:
-                visual_text = ""
+            visual_text = image_texts.get(full_path, "")
+            low = visual_text.lower()
             emails = re.findall(r'[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9-.]+', visual_text)
-            ids = re.findall(r'user_\d+|(?:account|search|export|audit_record|support|analytics|backup|connector)_\d+', visual_text)
+            ids = re.findall(r'user_\d+|(?:account|search|export|audit_record|support|analytics|backup|connector|data_flow|tombstone)_\d+', visual_text, re.I)
             identifiers = set(emails + ids)
-            all_records.append({"evidence_id": eid, "file_path": rel_path, "captured_at": captured_at,
-                                "system_id": "visual_evidence", "resource_id": ids[0] if ids else f"visual_{eid}",
-                                "data_category": "USER_PROFILE", "state": "PRESENT" if identifiers else "PRESENT",
-                                "identifiers": identifiers, "details": visual_text or "Image could not be OCR-verified; manual review required."})
+            stem = os.path.basename(rel_path).lower()
+            image_kinds = [
+                ("search", "search_service", "SEARCH_INDEX_ENTRY"),
+                ("analytics", "analytics_platform", "ANALYTICS_PROFILE"),
+                ("backup", "backup_service", "BACKUP_ARCHIVE"),
+                ("restore", "backup_service", "BACKUP_ARCHIVE"),
+                ("connector", "integration_service", "DATA_FLOW"),
+                ("marketing", "marketing_platform", "MARKETING_PROFILE"),
+                ("support", "support_platform", "SUPPORT_MESSAGE"),
+                ("security", "security_service", "SECURITY_AUDIT_LOG"),
+                ("deleted_account", "identity_service", "ACCOUNT_TOMBSTONE"),
+                ("account", "account_service", "USER_PROFILE"),
+            ]
+            system, category = next(((svc, cat) for key, svc, cat in image_kinds if key in stem), ("visual_evidence", "USER_PROFILE"))
+            state = "PRESENT"
+            if category == "DATA_FLOW":
+                state = "DISABLED" if re.search(r"disabled|inactive|stopped", low) else "ACTIVE"
+            elif category == "BACKUP_ARCHIVE":
+                state = "BLOCKED" if re.search(r"restore\s+(?:access\s+)?blocked|restore_allowed\s*[:=]\s*(?:false|no)", low) else "ACTIVE"
+            elif category == "SEARCH_INDEX_ENTRY":
+                state = "ABSENT" if re.search(r"no results|0 hits|not found|absent", low) else "PRESENT"
+            elif category in {"ANALYTICS_PROFILE", "SUPPORT_MESSAGE", "ACCOUNT_TOMBSTONE"}:
+                state = "PRESENT" if emails or re.search(r"email|phone|direct identifier|identifiable", low) else ("ANONYMIZED" if category == "ANALYTICS_PROFILE" else "REDACTED")
+            elif category == "USER_PROFILE":
+                state = "ABSENT" if re.search(r"deleted|not found|no profile|account absent", low) else "PRESENT"
+            visual_resources = list(dict.fromkeys(ids)) or [f"visual_{eid}"]
+            if not visual_text:
+                # No OCR engine can be assumed at runtime. Keep a machine-readable
+                # artifact record and flag its content as unverified for review.
+                state = "PRESENT" if category not in {"DATA_FLOW", "BACKUP_ARCHIVE"} else state
+            for resource_id in visual_resources:
+                all_records.append({
+                    "evidence_id": eid, "file_path": rel_path, "captured_at": captured_at,
+                    "observed_at": captured_at, "system_id": system,
+                    "resource_id": resource_id,
+                    "data_category": category, "state": state, "identifiers": identifiers,
+                    "details": visual_text or "IMAGE_CONTENT_UNVERIFIED: OCR unavailable; inspect source artifact",
+                    "policy_facts": {"ocr_verified": bool(visual_text), "content_unverified": not bool(visual_text)},
+                })
 
         # 6. PDF documents
         elif ext == ".pdf":
