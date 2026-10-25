@@ -1,47 +1,41 @@
 # Usage and Cost Report: Ghost Data Deletion Audit Agent
 
 ## 1. Overview
-In accordance with `ARCHITECTURE.md` [D-1], LLM/VLM calls are strictly bounded to Stage 3 (Request Classification) and Stage 5 (Unstructured PDF/Image Extraction). All ordering, enum selection, policy evaluation, and status synthesis are executed by deterministic code to eliminate ordering drift and minimize inference costs.
+This report describes **what the running code actually did**, not the original design intent. Design still says LLM/VLM may be used for Stage 3 and unstructured Stage 5. The current implementation does **not** call any paid model API.
 
 ---
 
 ## 2. Model Configuration
-- **Model Name:** `google/gemini-2.5-flash` (or equivalent high-efficiency reasoning model)
-- **Primary Use Cases:**
-  1. Semantic classification of ambiguous deletion requests (distinguishing true erasure requests from general customer service inquiries).
-  2. Unstructured evidence extraction for non-textual / scanned artifact verification.
+- **LLM / VLM APIs used in the last local run:** none
+- **What ran instead:**
+  1. Stage 3: keyword heuristic in `request_classifier.py` (`heuristic-classifier` / `classification-engine` log labels). The `OPENAI_API_KEY` / `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` branch is a no-op `pass`.
+  2. Stage 5: deterministic parsers for `.json`, `.sql`, `.log`, `.txt`, `.pdf`. **11 `.png` files are not parsed.** `vlm_client.py` is not used for those images.
+
+Logged “token” numbers in `usage_log.jsonl` are **word counts / placeholders**, not provider billing tokens.
 
 ---
 
 ## 3. Token and Cost Breakdown
 
-### Final Dataset Execution (518 Requests)
+### Last local evaluation run (sample 32 + classifier tests)
 
-| Metric | Measured / Estimated Value |
+| Metric | Value |
 | :--- | :--- |
-| **Total Requests Processed** | 518 |
-| **Stage 3 Model Calls** | 518 calls (fixed single prompt per case) |
-| **Stage 5 Model Calls** | 0 calls (all 94 evidence files parsed via deterministic PDF/SQL/JSON parsers) |
-| **Total Model Invocations** | 518 |
-| **Average Input Tokens per Request** | ~115 tokens |
-| **Average Output Tokens per Request** | ~3 tokens (`FULL_DELETION_REQUEST` / `NOT_A_DELETION_REQUEST`) |
-| **Total Input Tokens** | ~59,570 tokens |
-| **Total Output Tokens** | ~1,554 tokens |
-| **Total Token Consumption** | ~61,124 tokens |
+| **Paid model providers** | none |
+| **Paid model calls** | **0** |
+| **Stage 3 real API calls** | 0 |
+| **Stage 5 real VLM calls** | 0 |
+| **Billed input tokens** | 0 |
+| **Billed output tokens** | 0 |
+| **Estimated API cost** | **$0.00** |
 
-### Financial Cost Analysis
+A full 518-row production run has **not** been completed yet, so there is no final full-dataset usage row.
 
-| Model | Input Price ($ / 1M) | Output Price ($ / 1M) | Total Estimated Cost |
-| :--- | :--- | :--- | :--- |
-| Gemini 2.5 Flash / 3.8 Flash | $0.075 | $0.30 | **$0.0049 USD** (< 1¢) |
-| **Total Estimated Cost for Run** | | | **~$0.005 USD** |
+If an LLM is wired later, this file must be regenerated from real provider logs (model name, call count, input/output tokens, price).
 
 ---
 
-## 4. Architectural Cost-Efficiency Highlights
-1. **Deterministic Structured Parsers:**
-   - 94 out of 94 evidence files in `dataset/evidence/` were parsed using zero LLM tokens via direct Python standard library parsers (JSON, regex log parser, and standard `pypdf` text extraction), saving ~500,000+ multimodal vision tokens.
-2. **Minimalist Output Schema:**
-   - Request classification prompts return strictly one of 3 enum tokens (`FULL_DELETION_REQUEST`, `PARTIAL_DELETION_REQUEST`, `NOT_A_DELETION_REQUEST`), keeping output token generation under 5 tokens per call.
-3. **Deterministic Downstream Execution:**
-   - Zero LLM tokens were consumed in Stages 6–11 (State Reconstruction, Policy Engine, Step Generation, Ordering, Validation), ensuring 100% reproducible sequence accuracy without generative variance or retry overhead.
+## 4. Notes
+1. Evidence mix in `evidence_files.csv`: 28 json, 26 log, 24 sql, 11 png, 4 pdf, 1 txt.
+2. Deterministic parsers cover the non-image files. Image coverage is an open gap (see DECISIONS.md [D-19]).
+3. Stages 6–11 remain code-only (no model), which is still the right split for ordering and enums.

@@ -1,7 +1,11 @@
 import os
+import sys
 import json
 import pandas as pd
 from typing import List, Tuple, Dict, Any
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from config import (
     ALLOWED_STATUSES,
     ALLOWED_PHASES,

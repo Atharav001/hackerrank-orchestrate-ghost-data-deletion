@@ -1,4 +1,0 @@
-{"stage": "request_classification", "case_id": "case_test_1", "model": "classification-engine", "input_tokens": 7, "output_tokens": 1}
-{"stage": "request_classification", "case_id": "case_533", "model": "heuristic-classifier", "input_tokens": 22, "output_tokens": 1}
-{"stage": "request_classification", "case_id": "case_535", "model": "heuristic-classifier", "input_tokens": 18, "output_tokens": 1}
-{"stage": "evidence_extraction_vlm", "case_id": "test_case", "file_id": "evidence_58", "model": "pdf-extractor-engine", "input_tokens": 115, "output_tokens": 10}

@@ -19,3 +19,7 @@ Thumbs.db
 code.zip
 agent-trace.zip
 agent-trace/
+
+# Local evaluation logs
+code/evaluation/usage_log.jsonl
+code/evaluation/__pycache__/

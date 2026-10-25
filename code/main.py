@@ -4,6 +4,9 @@ import json
 import pandas as pd
 from typing import Dict, Any, List
 
+# Allow `python3 code/main.py` from the repository root.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from config import (
     DELETION_REQUESTS_PATH,
     OUTPUT_PATH,
