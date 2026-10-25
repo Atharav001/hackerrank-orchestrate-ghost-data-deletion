@@ -81,8 +81,8 @@ flowchart TD
     A[deletion_requests.csv] --> B[Ingest and validate schemas]
     B --> C[Resolve current and historical identifiers]
     C --> D{Does the text authorize deletion?}
-    D --|No: access, export, correction, opt-out| N[NOT_APPLICABLE: empty steps]
-    D --|Yes: full or scoped| E[Retrieve evidence and activity at or before audit_at]
+    D -->|No: access, export, correction, opt-out| N[NOT_APPLICABLE: empty steps]
+    D -->|Yes: full or scoped| E[Retrieve evidence and activity at or before audit_at]
     E --> F[Parse JSON, SQL, logs, TXT, PDF, image OCR]
     F --> G[Reconstruct latest state and active sync/restore risks]
     G --> H[Apply deletion_rules.csv condition + action]
@@ -104,11 +104,11 @@ flowchart LR
     ID --> AC[Global activity stream]
     EV --> ST[State at audit_at]
     AC --> ST
-    ST --> POL[Policy action by data_category\nDELETE / REDACT / ANONYMIZE / RETAIN]
-    POL -->|state violates policy| FIND[Evidence-backed finding]
-    FIND --> REM[Ordered remediation\nstop flows/block restore first]
+    ST --> POL[Policy action by category: DELETE, REDACT, ANONYMIZE, RETAIN]
+    POL -->|State violates policy| FIND[Evidence-backed finding]
+    FIND --> REM[Ordered remediation: stop flows and block restores first]
     REM --> VER[Empty-evidence future checks]
-    POL -->|state satisfies policy| PROOF[Evidence-backed verification]
+    POL -->|State satisfies policy| PROOF[Evidence-backed verification]
     PROOF --> OUT[COMPLETE]
     VER --> OUT2[INCOMPLETE]
 ```
