@@ -1,11 +1,7 @@
 import os
 import json
 import re
-import glob
 import sqlite3
-import shutil
-import subprocess
-import sys
 from typing import List, Dict, Any, Set
 import pandas as pd
 from config import DATASET_DIR, EVIDENCE_FILES_PATH
@@ -120,27 +116,15 @@ def _sql_records(path: str, evidence_id: str, rel_path: str, captured_at: str) -
     finally:
         conn.close()
 
-def _ocr_images(paths: List[str]) -> Dict[str, str]:
+def _ocr_images(paths: List[str]) -> Dict[str, Dict[str, Any]]:
+    """OCR images with local Tesseract first and optional text-only vision fallback."""
     if not paths:
         return {}
-    if sys.platform == "darwin" and shutil.which("swift"):
-        helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision_ocr.swift")
-        try:
-            proc = subprocess.run(["swift", "-module-cache-path", os.path.join("/private/tmp", "ghost_audit_swift_cache"), helper, *paths], capture_output=True, text=True, timeout=180, check=True)
-            data = json.loads(proc.stdout)
-            return {path: str(data.get(path, "")) for path in paths}
-        except (subprocess.SubprocessError, json.JSONDecodeError):
-            return {path: "" for path in paths}
-    try:
-        from PIL import Image
-        import pytesseract
-        if not shutil.which(pytesseract.pytesseract.tesseract_cmd):
-            raise RuntimeError("Tesseract binary is missing")
-        return {path: pytesseract.image_to_string(Image.open(path)) for path in paths}
-    except Exception as exc:
-        # Preserve the artifact for retrieval by filename and manifest capture time. OCR failure
-        # is surfaced in extracted details and must not make the full audit non-runnable.
-        return {path: "" for path in paths}
+    from image_ocr import extract_text
+    results: Dict[str, Dict[str, Any]] = {}
+    for path in paths:
+        results[path] = extract_text(path)
+    return results
 
 def _log_records(path: str, evidence_id: str, rel_path: str, captured_at: str) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
@@ -571,11 +555,9 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
 
         # 5. Image evidence is OCRed up front so identifiers can connect it to a subject.
         elif ext in (".png", ".jpg", ".jpeg"):
-            visual_text = image_texts.get(full_path, "")
+            ocr_result = image_texts.get(full_path, {})
+            visual_text = str(ocr_result.get("text", ""))
             low = visual_text.lower()
-            emails = re.findall(r'[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9-.]+', visual_text)
-            ids = re.findall(r'user_\d+|(?:account|search|export|audit_record|support|analytics|backup|connector|data_flow|tombstone)_\d+', visual_text, re.I)
-            identifiers = set(emails + ids)
             stem = os.path.basename(rel_path).lower()
             image_kinds = [
                 ("search", "search_service", "SEARCH_INDEX_ENTRY"),
@@ -586,10 +568,69 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
                 ("marketing", "marketing_platform", "MARKETING_PROFILE"),
                 ("support", "support_platform", "SUPPORT_MESSAGE"),
                 ("security", "security_service", "SECURITY_AUDIT_LOG"),
+                ("customer_export", "export_service", "USER_EXPORT"),
                 ("deleted_account", "identity_service", "ACCOUNT_TOMBSTONE"),
+                ("object_storage", "object_storage", "SUPPORT_ATTACHMENT"),
                 ("account", "account_service", "USER_PROFILE"),
             ]
             system, category = next(((svc, cat) for key, svc, cat in image_kinds if key in stem), ("visual_evidence", "USER_PROFILE"))
+            # Normalize common OCR spacing errors in typed resource identifiers.
+            normalized_text = re.sub(r"\b(data_flow|audit_record|account|search|export|support|analytics|backup|connector|object|tombstone|marketing)\s+(\d+)\b", r"\1_\2", visual_text, flags=re.I)
+            expected_prefix = {
+                "USER_PROFILE": "account", "SEARCH_INDEX_ENTRY": "search", "ANALYTICS_PROFILE": "analytics",
+                "BACKUP_ARCHIVE": "backup", "DATA_FLOW": "data_flow|connector", "MARKETING_PROFILE": "marketing",
+                "USER_EXPORT": "export", "SUPPORT_MESSAGE": "support", "SUPPORT_ATTACHMENT": "object|support", "SECURITY_AUDIT_LOG": "audit_record",
+                "ACCOUNT_TOMBSTONE": "user",
+            }.get(category, "")
+            resource_pattern = rf"\b(?:{expected_prefix})_\d+\b" if expected_prefix else r"\b(?:account|search|export|support|analytics|backup|connector|data_flow|audit_record|object|tombstone|marketing)_\d+\b"
+            resources = list(dict.fromkeys(re.findall(resource_pattern, normalized_text, re.I)))
+            user_ids = list(dict.fromkeys(re.findall(r"\buser_\d+\b", normalized_text, re.I)))
+            emails = list(dict.fromkeys(re.findall(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9.-]+", visual_text)))
+            hashes = list(dict.fromkeys(re.findall(r"\b[a-fA-F0-9]{40,64}\b", visual_text)))
+            phone_candidates = list(dict.fromkeys(re.findall(r"\+\d[\d ().-]{7,}\d", visual_text)))
+            identities = emails + user_ids + hashes + phone_candidates
+            # A storage browser proves object existence, but its screenshot may not
+            # display a subject email. Connect its filename to resource IDs grounded
+            # by identity-linked activity during retrieval.
+            if category == "SUPPORT_ATTACHMENT":
+                object_matches = re.findall(r"delivery_confirmation_(\d+)\.pdf", low)
+                resources.extend(f"object_{n}" for n in object_matches)
+                resources = list(dict.fromkeys(resources))
+            if category == "ACCOUNT_TOMBSTONE" and not resources:
+                resources = user_ids[:1]
+            visual_resources = resources or [f"visual_{eid}"]
+
+            # Associate a resource only with identity tokens on the same visual row
+            # (or a nearby line when OCR returns text without coordinates).
+            tokens = ocr_result.get("tokens") or []
+            token_resources = []
+            for tok in tokens:
+                word = str(tok.get("text", ""))
+                center_y = tok["top"] + tok.get("height", 0) / 2
+                match = re.search(resource_pattern, word, re.I) if expected_prefix else None
+                if match:
+                    token_resources.append((match.group(0).lower(), center_y))
+            # Recover OCR-split identifiers such as `data_flow` + `9846` when
+            # the prefix and numeric suffix share a visual row.
+            prefix_names = expected_prefix.split("|") if expected_prefix else []
+            for tok in tokens:
+                word = str(tok.get("text", "")).lower().rstrip("_:")
+                if word not in prefix_names:
+                    continue
+                cy = tok["top"] + tok.get("height", 0) / 2
+                right = tok["left"] + tok.get("width", 0)
+                candidates = [n for n in tokens if re.fullmatch(r"\d{2,8}", str(n.get("text", "")))
+                              and abs((n["top"] + n.get("height", 0) / 2) - cy) <= 8
+                              and 0 <= n["left"] - right <= 180]
+                if candidates:
+                    number = min(candidates, key=lambda n: n["left"] - right)
+                    token_resources.append((f"{word}_{number['text']}", cy))
+            resources = list(dict.fromkeys(resources + [rid for rid, _ in token_resources]))
+            token_identities = []
+            id_pattern = re.compile(r"(?:[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9.-]+|user_\d+|\b[a-fA-F0-9]{40,64}\b|\+\d[\d ().-]{7,}\d)", re.I)
+            for tok in tokens:
+                for value in id_pattern.findall(str(tok.get("text", ""))):
+                    token_identities.append((value, tok["top"] + tok.get("height", 0) / 2))
             state = "PRESENT"
             if category == "DATA_FLOW":
                 state = "DISABLED" if re.search(r"disabled|inactive|stopped", low) else "ACTIVE"
@@ -598,22 +639,58 @@ def extract_all_evidence_records() -> List[Dict[str, Any]]:
             elif category == "SEARCH_INDEX_ENTRY":
                 state = "ABSENT" if re.search(r"no results|0 hits|not found|absent", low) else "PRESENT"
             elif category in {"ANALYTICS_PROFILE", "SUPPORT_MESSAGE", "ACCOUNT_TOMBSTONE"}:
-                state = "PRESENT" if emails or re.search(r"email|phone|direct identifier|identifiable", low) else ("ANONYMIZED" if category == "ANALYTICS_PROFILE" else "REDACTED")
+                direct_pii = bool(emails or hashes or phone_candidates)
+                if category == "ACCOUNT_TOMBSTONE":
+                    direct_pii = direct_pii or bool(re.search(r"(?:full[_ ]name|customer name)\s*[:=]", low))
+                    state = "PRESENT" if direct_pii else "REDACTED"
+                elif category == "ANALYTICS_PROFILE":
+                    state = "PRESENT" if direct_pii or user_ids else "ANONYMIZED"
+                else:
+                    state = "PRESENT" if direct_pii or re.search(r"support_\d+.{0,60}[A-Z][a-z]+\s+[A-Z][a-z]+", visual_text) else "REDACTED"
             elif category == "USER_PROFILE":
                 state = "ABSENT" if re.search(r"deleted|not found|no profile|account absent", low) else "PRESENT"
-            visual_resources = list(dict.fromkeys(ids)) or [f"visual_{eid}"]
-            if not visual_text:
-                # No OCR engine can be assumed at runtime. Keep a machine-readable
-                # artifact record and flag its content as unverified for review.
-                state = "PRESENT" if category not in {"DATA_FLOW", "BACKUP_ARCHIVE"} else state
             for resource_id in visual_resources:
+                row_ids = set()
+                if tokens and resource_id != f"visual_{eid}":
+                    positions = [y for rid, y in token_resources if rid == resource_id.lower()]
+                    if resource_id.startswith("user_"):
+                        positions.extend(y for value, y in token_identities if value.lower() == resource_id.lower())
+                    if positions:
+                        for identity_value, identity_y in token_identities:
+                            # Keep one nearest value of each identifier type per
+                            # resource row to avoid joining neighboring table rows.
+                            same_type = [v for v, _ in token_identities if
+                                         ("@" in v) == ("@" in identity_value) and
+                                         v.startswith("user_") == identity_value.startswith("user_")]
+                            if not same_type:
+                                continue
+                            distance = min(abs(identity_y - resource_y) for resource_y in positions)
+                            closest = min(abs(y - resource_y) for v, y in token_identities if v in same_type for resource_y in positions)
+                            if distance == closest and distance <= 180:
+                                row_ids.add(identity_value)
+                elif resource_id != f"visual_{eid}":
+                    # The OpenAI OCR path returns faithful text without bounding
+                    # boxes. Associate identifiers only on or near the matching
+                    # resource line, never every identifier on a multi-row page.
+                    text_lines = visual_text.splitlines()
+                    id_regex = re.compile(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9.-]+|user_\d+|\b[a-fA-F0-9]{40,64}\b|\+\d[\d ().-]{7,}\d", re.I)
+                    matching_lines = [i for i, line in enumerate(text_lines)
+                                      if re.search(re.escape(resource_id).replace("_", r"[_ ]+"), line, re.I)]
+                    for line_no in matching_lines:
+                        for nearby in text_lines[max(0, line_no - 2):line_no + 3]:
+                            row_ids.update(id_regex.findall(nearby))
+                elif len(visual_resources) == 1:
+                    row_ids.update(identities)
                 all_records.append({
                     "evidence_id": eid, "file_path": rel_path, "captured_at": captured_at,
                     "observed_at": captured_at, "system_id": system,
-                    "resource_id": resource_id,
-                    "data_category": category, "state": state, "identifiers": identifiers,
-                    "details": visual_text or "IMAGE_CONTENT_UNVERIFIED: OCR unavailable; inspect source artifact",
-                    "policy_facts": {"ocr_verified": bool(visual_text), "content_unverified": not bool(visual_text)},
+                    "resource_id": resource_id, "data_category": category, "state": state,
+                    "identifiers": row_ids, "details": visual_text or "IMAGE_CONTENT_UNVERIFIED: OCR unavailable; inspect source artifact",
+                    "policy_facts": {
+                        "ocr_verified": bool(visual_text), "content_unverified": not bool(visual_text),
+                        "ocr_source": ocr_result.get("source", "unavailable"),
+                        "ocr_confidence": ocr_result.get("confidence"),
+                    },
                 })
 
         # 6. PDF documents

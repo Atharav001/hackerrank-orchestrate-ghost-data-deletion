@@ -1,0 +1,4 @@
+pandas>=2.0
+pypdf>=4.0
+# Optional; needed only when OPENAI_OCR_MODE=auto|openai falls back to the API.
+openai>=2.16,<3

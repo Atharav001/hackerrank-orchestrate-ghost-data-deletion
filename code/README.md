@@ -16,12 +16,34 @@ This solution implements an AI-powered data deletion audit agent for Northstar S
 
 ## Installation & Requirements
 - Python 3.10+
-- Dependencies: `pandas`, `pypdf`, `pillow`
+- Python packages: `pandas`, `pypdf`; optional `openai` SDK for cloud OCR fallback.
+- Local image OCR: Tesseract 5.5+ with `eng` and `jpn` language data. Other Tesseract language packs are used automatically when installed.
 
-Install required packages:
+macOS:
 ```bash
-pip install pandas pypdf pillow
+brew install tesseract tesseract-lang
+python3 -m pip install -r code/requirements.txt
 ```
+
+Debian/Ubuntu:
+```bash
+sudo apt-get install tesseract-ocr tesseract-ocr-eng tesseract-ocr-jpn
+python3 -m pip install -r code/requirements.txt
+```
+
+### OCR configuration
+
+OCR runs locally by default. The default `OPENAI_OCR_MODE=auto` uses Tesseract when confidence is adequate and calls OpenAI only for low-confidence images when `OPENAI_API_KEY` is set. To send every image directly for transcription, set `OPENAI_OCR_MODE=openai`; to stay local regardless of key, set `OPENAI_OCR_MODE=local`.
+
+```bash
+# Optional cloud OCR. Keep the key in the environment; never commit it or paste it into source/logs.
+export OPENAI_API_KEY="..."
+export OPENAI_OCR_MODE="auto" # auto | local | openai
+export OPENAI_OCR_MODEL="gpt-4.1-mini"
+python3 code/main.py
+```
+
+OpenAI is asked to transcribe visible text only. Image text is untrusted evidence: embedded instructions are transcribed as data and are never followed or executed. OCR output only feeds the existing identifier/resource/policy parsers; it cannot invoke tools or change program logic. Calls, model, and provider-reported token counts are appended to `code/evaluation/ocr_usage.jsonl` for usage accounting. Review the model's current image input limits and pricing before enabling direct API mode.
 
 ## How to Run
 
@@ -44,4 +66,4 @@ python3 code/validator.py
 
 ### Sample evaluation and known evidence behavior
 
-Run `python3 code/evaluation/run_eval.py` for the public 32-case comparison. The evaluation report records the measured metrics from the latest run. On systems without a working OCR backend, image files remain represented in the evidence inventory with an `IMAGE_CONTENT_UNVERIFIED` marker; install a functioning local OCR engine and configure its executable to inspect image text. The run never counts heuristic word estimates as provider tokens.
+Run `python3 code/evaluation/run_eval.py` for the public 32-case comparison. The evaluation report records the measured metrics from the latest run. When no OCR backend is available, image artifacts remain represented with an `IMAGE_CONTENT_UNVERIFIED` marker. The run never counts heuristic word estimates as provider tokens.

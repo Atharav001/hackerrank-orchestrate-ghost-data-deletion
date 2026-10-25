@@ -22,63 +22,64 @@ def get_activity_df() -> pd.DataFrame:
     return _ACTIVITY_DF
 
 def retrieve_evidence_for_case(case_row: Dict[str, Any], identity_info: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Stage 4 — Evidence Retrieval Layer:
-    Retrieves evidence files and system activity rows matching ANY identifier
-    of the subject where event_time / captured_at <= audit_at.
-    """
+    """Retrieve identity-linked records and expand only through grounded resource IDs."""
     audit_at = str(case_row.get("audit_at", ""))
-    requested_at = str(case_row.get("requested_at", ""))
     user_id = identity_info.get("user_id")
-    # Only identifiers known by the request's audit cutoff may be used. This prevents
-    # a later identity change from retroactively expanding the search set.
     typed_ids = identity_info.get("identifiers_as_of_audit", identity_info.get("all_identifiers", {}))
-    legal_ids = typed_ids.get("user_ids", []) + typed_ids.get("emails", []) + typed_ids.get("phones", []) + typed_ids.get("email_hashes", [])
-    all_values_lower = {str(v).lower().strip() for v in legal_ids if len(str(v).strip()) >= 3}
-    if "email" in case_row and case_row["email"]:
-        all_values_lower.add(case_row["email"].lower().strip())
+    legal_ids = (typed_ids.get("user_ids", []) + typed_ids.get("emails", []) +
+                 typed_ids.get("phones", []) + typed_ids.get("email_hashes", []))
+    targets = {str(v).lower().strip() for v in legal_ids if len(str(v).strip()) >= 3}
+    if case_row.get("email"):
+        targets.add(str(case_row["email"]).lower().strip())
 
-    # 1. Retrieve matching evidence records
-    all_ev_records = extract_all_evidence_records()
-    matched_ev_records = []
-    
-    for r in all_ev_records:
-        cap_at = r.get("captured_at", "")
-        observed_at = str(r.get("observed_at") or cap_at)
+    all_records = extract_all_evidence_records()
+    eligible = []
+    direct_evidence = []
+    for rec in all_records:
+        cap_at = str(rec.get("captured_at", ""))
+        observed_at = str(rec.get("observed_at") or cap_at)
         if cap_at <= audit_at and observed_at <= audit_at:
-            if any(_contains_identifier(v, target) for v in r.get("identifiers", []) for target in all_values_lower):
-                matched_ev_records.append(r)
+            eligible.append(rec)
+            if any(_contains_identifier(candidate, target)
+                   for candidate in rec.get("identifiers", []) for target in targets):
+                direct_evidence.append(rec)
 
-    # 2. Retrieve matching system activity records
+    # First match activity via legal identifiers. Then use resource IDs explicitly
+    # tied to the subject by those activity rows to join artifacts that show no PII
+    # (e.g. an object-storage screenshot referenced by an identity-link event).
     act_df = get_activity_df()
-    # Filter activity at or before audit_at
-    sub_act = act_df[act_df["event_time"] <= audit_at]
-    
-    matched_act_records = []
-    # Resource IDs from subject-matched artifacts provide a grounded join into
-    # the global activity stream even when the activity's prose omits the user.
-    evidence_resource_ids = {str(r.get("resource_id", "")).lower() for r in matched_ev_records}
-    # Fast match against details, resource_id, and timing
-    for _, a_row in sub_act.iterrows():
-        det_lower = str(a_row["details"]).lower()
-        res_id = str(a_row["resource_id"])
-        
-        # Match if details mention user_id or any identifier
-        matched = res_id.lower() in evidence_resource_ids
-        if user_id and _contains_identifier(det_lower, user_id):
-            matched = True
-        elif any(_contains_identifier(det_lower, val) for val in all_values_lower):
-            matched = True
-            
-        if matched:
-            matched_act_records.append(dict(a_row))
+    activity_candidates = act_df[act_df["event_time"].astype(str) <= audit_at]
+    direct_activity = []
+    for _, row in activity_candidates.iterrows():
+        details = str(row.get("details", ""))
+        if any(_contains_identifier(details, target) for target in targets):
+            direct_activity.append(dict(row))
+    linked_resource_ids = {str(r.get("resource_id", "")).lower() for r in direct_evidence}
+    linked_resource_ids.update(str(r.get("resource_id", "")).lower() for r in direct_activity)
+    matched_activity = list(direct_activity)
+    seen_activity = {str(r.get("activity_id", "")) for r in matched_activity}
+    for _, row in activity_candidates.iterrows():
+        rec = dict(row)
+        aid = str(rec.get("activity_id", ""))
+        if aid not in seen_activity and str(rec.get("resource_id", "")).lower() in linked_resource_ids:
+            matched_activity.append(rec)
+            seen_activity.add(aid)
+
+    linked_resource_ids.update(str(r.get("resource_id", "")).lower() for r in matched_activity)
+    matched_evidence = list(direct_evidence)
+    seen_evidence = {(str(r.get("evidence_id")), str(r.get("system_id")), str(r.get("resource_id"))) for r in matched_evidence}
+    for rec in eligible:
+        key = (str(rec.get("evidence_id")), str(rec.get("system_id")), str(rec.get("resource_id")))
+        if key not in seen_evidence and str(rec.get("resource_id", "")).lower() in linked_resource_ids:
+            matched_evidence.append(rec)
+            seen_evidence.add(key)
 
     return {
         "case_id": case_row.get("case_id"),
         "user_id": user_id,
         "audit_at": audit_at,
-        "matched_evidence_records": matched_ev_records,
-        "matched_activity_records": matched_act_records
+        "matched_evidence_records": matched_evidence,
+        "matched_activity_records": matched_activity,
     }
 
 def test_evidence_retrieval():

@@ -83,8 +83,10 @@ flowchart TD
     C --> D{Does the text authorize deletion?}
     D -->|No: access, export, correction, opt-out| N[NOT_APPLICABLE: empty steps]
     D -->|Yes: full or scoped| E[Retrieve evidence and activity at or before audit_at]
-    E --> F[Parse JSON, SQL, logs, TXT, PDF, image OCR]
-    F --> G[Reconstruct latest state and active sync/restore risks]
+    E --> F[Parse JSON, SQL, logs, TXT, and PDFs with local screenshot OCR]
+    F --> OCR[Tesseract transcription with optional OpenAI fallback]
+    OCR --> SAFE[Treat image text as untrusted data and never execute it]
+    SAFE --> G[Reconstruct latest state and active sync/restore risks]
     G --> H[Apply deletion_rules.csv condition + action]
     H --> I{Every relevant record compliant?}
     I -->|Yes| J[COMPLETE: evidence backed verification]
@@ -114,6 +116,10 @@ flowchart LR
 ```
 
 For a request that does not authorize deletion, the pipeline stops after classification and emits `NOT_APPLICABLE` with `[]`; it does not manufacture deletion work. For an authorized request, current and historical identifiers are joined to participant-visible evidence only at or before `audit_at`. A record that should be deleted but remains is reported with `REPORT_REMAINING_RECORD`; exposed identifiers in a retained record use `REPORT_EXPOSED_PII`; active synchronization uses `REPORT_ACTIVE_DATA_FLOW`; and an unsafe restore path uses `REPORT_RESTORE_RISK`. The remediation order disables flows and blocks restores before deleting, redacting, or anonymizing dependent records. A `COMPLETE` case contains only evidence-backed verification steps. An `INCOMPLETE` case contains evidence-backed findings, then future remediation steps with empty `evidence_id`, then future verification steps with empty `evidence_id`.
+
+### Image OCR and prompt-injection handling
+
+Screenshots are transcribed with local Tesseract first. The optional OpenAI vision fallback is controlled by `OPENAI_OCR_MODE=auto|local|openai`; `auto` uses the API only when local OCR confidence is low, while `openai` sends all screenshot evidence directly for transcription. The OpenAI SDK (`openai>=2.16,<3`) and API key are optional. Set the key in `OPENAI_API_KEY`; never put it in source, `.env` committed to Git, or `log.txt`. OCR prompts request literal text only. Text visible in images, including any prompt-injection instructions, is treated as untrusted evidence content; no shell, tools, or instructions are invoked from OCR output. API usage and token counts are recorded when calls occur. Current model image-input pricing depends on image size and detail, so check [OpenAI image input pricing](https://developers.openai.com/api/docs/guides/image-cost-calculator) before enabling cloud OCR.
 
 ---
 

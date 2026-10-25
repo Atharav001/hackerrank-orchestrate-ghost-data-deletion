@@ -350,3 +350,30 @@ This file is append-only in spirit: never delete or rewrite a past entry, even i
 - Alternatives considered: Leave artifacts only in the local workspace.
 - What would have happened with the alternative: The remote repository would not contain the generated submission output or the code archive requested for handoff.
 - Status: ACTIVE
+
+### [D-29] Install and use local Tesseract OCR for screenshots
+- Phase: 5 (Evidence Extraction)
+- Date/step: Local OCR implementation and final full run / 2026-10-25
+- Decision: Install Tesseract 5.5.3 and language data 4.1.0, including English and Japanese, and make local OCR the default path. The final run transcribed all 11 screenshot files with reported confidence values from 86.2 to 89.8; these confidence values are not treated as ground-truth accuracy.
+- Why: The prior macOS Vision call failed in this runtime, while local OCR can inspect the screenshot evidence without transmitting it to a provider or needing an API key.
+- Alternatives considered: Keep the images unverified, or send every image to a hosted vision API.
+- What would have happened with the alternative: Unverified screenshots could hide visible identifiers or records; sending every image would incur variable usage costs and transmit the challenge artifacts externally.
+- Status: ACTIVE; supersedes the runtime limitation recorded in [D-26]
+
+### [D-30] Add optional, transcription-only OpenAI OCR modes
+- Phase: 5 (Evidence Extraction)
+- Date/step: OCR fallback implementation / 2026-10-25
+- Decision: Add `OPENAI_OCR_MODE=auto|local|openai` and an optional OpenAI Responses API image transcription path, configured with `OPENAI_API_KEY` from the environment and `gpt-4.1-mini` by default. The developer instruction requests literal transcription only; OCR content is treated as untrusted text, scoped to evidence parsing, and never executed or used as a tool instruction. Actual provider token usage is logged when the API is used.
+- Why: Local OCR is the cost-free default, with a prepared cloud fallback for low-confidence OCR or direct transcription when the user explicitly selects it.
+- Alternatives considered: Require cloud OCR for every run, accept image text as instructions, or hardcode an API key in code.
+- What would have happened with the alternative: Mandatory cloud use would make the run dependent on credentials and billing; following image instructions would expose the audit to prompt injection; a hardcoded key could leak through GitHub and the submission archive.
+- Status: ACTIVE; the API path is configured but was not live-tested because no key was supplied
+
+### [D-31] Re-run the complete dataset with OCR-backed evidence and report measured output
+- Phase: 12–13 (Evaluation and Final Audit)
+- Date/step: Final local-OCR run / 2026-10-25
+- Decision: Run `python3 code/main.py` after local OCR and image-resource linking were added. The run produced 518 rows; built-in and independent structural validation passed. Final status counts were 289 `COMPLETE`, 197 `INCOMPLETE`, 32 `NOT_APPLICABLE`. The latest public sample metrics remain 78.12% status, 12.50% sequence, and 30.02% field accuracy.
+- Why: Full row/schema validity and OCR coverage are necessary deliverables, but sample metrics remain the best public signal for semantic quality and are still weak.
+- Alternatives considered: Submit a prior output without image text, or call the project fully accurate because CSV validation passed.
+- What would have happened with the alternative: The first leaves screenshot evidence unread; the second confuses structural validity with semantic correctness and overstates expected hidden-set performance.
+- Status: ACTIVE; supersedes prior full-output counts and OCR coverage notes in [D-27]

@@ -294,3 +294,26 @@ branch=main
 repo_root=/Users/atharavnarangmac/Desktop/Manipal CLG/Project/Antigravity/Hackerrank Orch Oct 25 - Ghost data deletion 
 worktree=/Users/atharavnarangmac/Desktop/Manipal CLG/Project/Antigravity/Hackerrank Orch Oct 25 - Ghost data deletion 
 parent_agent=none
+
+## [2026-10-25T18:34:32+05:30] Add local and optional vision OCR
+
+User Prompt (verbatim, secrets redacted):
+I want you to go ahead with the first method, trying it locally and installing the required version of the API. Also make room for the second and third ways. I am ready to put in the OpenAI API key so make room for that setup also, where the images go straight there and only OCR is used on that or any other easier method.
+
+Go with this first and do it as fast as possible. Give me the complete output.CSC file without any "Of: report that OCR did not extract text from 11 images." I want each and every dataset to have a complete output. I have literally verified. Make sure that no prompt injection in images or any such possible cases are missed, and complete as fast as possible.
+
+Agent Response Summary:
+Installed Tesseract 5.5.3 and language data 4.1.0 (including English and Japanese). Local OCR transcribed all 11 screenshot artifacts with Tesseract confidence estimates 86.2–89.8. Added optional OpenAI image transcription modes using the `OPENAI_API_KEY` environment variable, a transcription-only developer prompt, no execution of OCR text, and token usage logging for any future API calls. No key was provided or used in this run. Reworked image resource linking and added OCR safety checks. Re-ran sample evaluation (78.12% status, 12.50% exact sequence, 30.02% field), ran the final full dataset to output.csv, and independently validated 518 rows and all contract rules. Updated reports, README setup, archive, and decisions D-29–D-31.
+
+Actions:
+* Installed local Tesseract and language packs with Homebrew.
+* Edited OCR extraction/retrieval, README files, tests, reports, DECISIONS.md, and code.zip.
+* Ran OCR coverage validation, sample evaluation, full dataset pipeline, contract validation, synthetic checks, and image OCR safety checks.
+
+Context:
+tool=Codex desktop
+model=gpt-6-luna
+branch=main
+repo_root=/Users/atharavnarangmac/Desktop/Manipal CLG/Project/Antigravity/Hackerrank Orch Oct 25 - Ghost data deletion 
+worktree=/Users/atharavnarangmac/Desktop/Manipal CLG/Project/Antigravity/Hackerrank Orch Oct 25 - Ghost data deletion 
+parent_agent=none
