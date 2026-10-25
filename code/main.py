@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import argparse
 import pandas as pd
 from typing import Dict, Any, List
 
@@ -113,4 +114,7 @@ def run_pipeline(input_path: str = DELETION_REQUESTS_PATH, output_path: str = OU
     return out_df
 
 if __name__ == "__main__":
-    run_pipeline()
+    parser = argparse.ArgumentParser(description="Run the deletion audit on the full dataset or public sample.")
+    parser.add_argument("--sample", action="store_true", help="Audit dataset/sample_deletion_requests.csv (32 public cases).")
+    args = parser.parse_args()
+    run_pipeline(input_path=SAMPLE_DELETION_REQUESTS_PATH if args.sample else DELETION_REQUESTS_PATH)

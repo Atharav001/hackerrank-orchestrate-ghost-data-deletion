@@ -81,14 +81,14 @@ flowchart TD
     A[deletion_requests.csv] --> B[Ingest and validate schemas]
     B --> C[Resolve current and historical identifiers]
     C --> D{Does the text authorize deletion?}
-    D -- No: access, export, correction, opt-out --> N[NOT_APPLICABLE\nsteps_json=[]]
-    D -- Yes: full or scoped --> E[Retrieve evidence and activity <= audit_at]
+    D --|No: access, export, correction, opt-out| N[NOT_APPLICABLE: empty steps]
+    D --|Yes: full or scoped| E[Retrieve evidence and activity at or before audit_at]
     E --> F[Parse JSON, SQL, logs, TXT, PDF, image OCR]
     F --> G[Reconstruct latest state and active sync/restore risks]
     G --> H[Apply deletion_rules.csv condition + action]
     H --> I{Every relevant record compliant?}
-    I -- Yes --> J[COMPLETE\nverification evidence only]
-    I -- No --> K[INCOMPLETE\nfindings -> remediation -> future verification]
+    I -->|Yes| J[COMPLETE: evidence backed verification]
+    I -->|No| K[INCOMPLETE: findings, remediation, future verification]
     J --> L[Numeric case ordering + contract validation]
     K --> L
     N --> L
@@ -99,7 +99,7 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    R[Request: email, text, audit_at] --> ID[Identity graph\ncurrent + historical email/phone/hash/user_id]
+    R[Request: email, text, audit_at] --> ID[Identity graph: current and historical identifiers]
     ID --> EV[Evidence manifest + artifacts]
     ID --> AC[Global activity stream]
     EV --> ST[State at audit_at]
